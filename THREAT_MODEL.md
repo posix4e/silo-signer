@@ -31,6 +31,9 @@ it was sent, and what it signs is what it showed.
   payment arrives.
 - **Press the buttons.** Only in an image built for regtest, which the tests need. In a signet or mainnet
   image that frame is refused (`only_test_builds_inject_keys`).
+- **Read and write the phone's registers.** Only in an image built for regtest, where it is how new hardware
+  is brought up from the host (`tools/bench/`), and only inside the register windows the image maps. In a
+  signet or mainnet image that frame is refused (`only_test_builds_touch_registers`).
 
 ## What it rests on
 
@@ -64,6 +67,7 @@ it was sent, and what it signs is what it showed.
   the processor's data-independent timing mode is on. Power and electromagnetic measurement by someone with
   the phone on a bench are not addressed. That the compiler kept the code free of secret-dependent branches is
   checked for silo's build of the same signing code, not for this one.
-- **A regtest image.** The host can press its buttons. It is for tests and holds nothing of value.
+- **A regtest image.** The host can press its buttons, and read and write its registers. It is for tests and
+  the bench, and holds nothing of value.
 - **Long payments over the cable.** One frame is at most 4,096 bytes over USB. A payment that does not fit is
   refused, not cut short.

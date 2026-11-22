@@ -30,8 +30,8 @@ import Tricorder.Ui.View
 
 Zero Linux, zero Android, zero filesystems:
 - Verifies FDT (`Kernel.Fdt.parse`) & hardware RNG (`Kernel.Rng`, fail-closed)
-- Mounts zero-filesystem 2-slot raw block persistence (`Kernel.VaultStore`) over `VirtioBlk` (QEMU)
-  or polled Exynos UFS (`Komodo`)
+- Keeps the vault in two raw 4 KiB slots (`Kernel.VaultStore`): on a `VirtioBlk` disk under QEMU, and in
+  memory only on the Pixel 9 Pro XL, where nothing is written to storage and power-off forgets the key
 - Renders the screens and the focus ring (`Ui.Layout.withFocusRing`) onto hardware framebuffer
   (`Ramfb` in QEMU / ABL `cont_splash` + DECON on Pixel 9 Pro XL)
 - Driven by physical buttons (Volume Up / Volume Down / Power via verified `Kernel.GpioKeys`) and
@@ -212,7 +212,8 @@ private def performEffect (st : BareState) (eff : Effect) : BaseIO (BareState ×
     return (st, .hostStatus "PUSH PSBT OVER WIRE" false)
   | .saveDescriptor desc =>
     let st' ← persistSlot st (currentAttempts st) (currentVault? st) (some desc.toUTF8)
-    return (st', .hostStatus "DESCRIPTOR SAVED TO RAW FLASH" false)
+    -- With no disk (the phone) the wallet is held in memory, and is gone at power-off: say so.
+    return (st', .hostStatus (if st.blk?.isSome then "WALLET SAVED TO DISK" else "WALLET KEPT UNTIL POWER-OFF") false)
   | .exportKeys _ =>
     return (st, .hostStatus "KEYS READY ON QR / WIRE" false)
   | .executeSign tx =>
@@ -305,8 +306,8 @@ private def handleKey (st : BareState) (k : GpioKeys.KeyEvent) : BaseIO BareStat
 
 /-- Whether a control takes the physical buttons, so that a tap on the glass cannot press it. -/
 private def needsButtons : ButtonId → Bool
-  -- TODO(human): decide which controls a tap on the glass must never press. Arming and signing are the
-  -- floor; say whether anything else belongs here (see the list of `ButtonId` in `Tricorder/Ui/Layout.lean`).
+  -- Arming and signing, and nothing else. They are the two presses that spend. Every other control either
+  -- shows something or can be undone on the device: a wallet accepted by a tap still signs nothing by itself.
   | .armSign | .confirmSign => true
   | _ => false
 

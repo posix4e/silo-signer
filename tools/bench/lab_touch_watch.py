@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the touch reports the controller sends for a while: tools/lab_touch_watch.py [seconds]"""
+"""Print the touch reports the controller sends for a while: tools/bench/lab_touch_watch.py [seconds]"""
 import sys, os, time, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lab_touch import *

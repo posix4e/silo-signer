@@ -158,12 +158,12 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
   | .setupRestore entered _, .restorePickWord w =>
     if entered.size < 24 then
       let next := entered.push w
-      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size} WORDS ENTERED", isError := false }, [])
+      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size} {if next.size == 1 then "WORD" else "WORDS"} ENTERED", isError := false }, [])
     else (m, [])
   | .setupRestore entered _, .restorePopWord =>
     if entered.size > 0 then
       let next := entered.pop
-      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size} WORDS ENTERED", isError := false }, [])
+      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size} {if next.size == 1 then "WORD" else "WORDS"} ENTERED", isError := false }, [])
     else
       ({ m with screen := .setupChoice, secrets := none, statusMsg := "INITIALIZE KEY", isError := false }, [])
   | .setupRestore entered _, .restoreSubmit =>

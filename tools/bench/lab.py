@@ -5,14 +5,14 @@ The image answers one wire operation, `lab`, with a run of register reads, write
 mainnet builds it is refused (`Kernel.WireProofs.only_test_builds_touch_registers`). This is a bench tool:
 nothing here is part of the signer.
 
-  tools/lab.py windows                    the register windows the image may touch
-  tools/lab.py r <addr> [count]           read 32-bit registers
-  tools/lab.py w <addr> <value>           write one
-  tools/lab.py fdt <out.dtb>              save the device tree the bootloader handed over
+  tools/bench/lab.py windows                    the register windows the image may touch
+  tools/bench/lab.py r <addr> [count]           read 32-bit registers
+  tools/bench/lab.py w <addr> <value>           write one
+  tools/bench/lab.py fdt <out.dtb>              save the device tree the bootloader handed over
 """
 import os, struct, subprocess, sys
 
-USB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "tricorder-usb")
+USB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "tricorder-usb")
 
 
 class Refused(Exception):
