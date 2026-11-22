@@ -4,7 +4,7 @@ import Tricorder.Ui.Font
 import Tricorder.Ui.Layout
 import Tricorder.Ui.State
 
-/-! # Star Trek LCARS View Renderer
+/-! # The screens, drawn
 
 Builds a pure `List DrawCmd` for every Tricorder screen at logical resolution `w × h` (default `540 × 1200`
 for Pixel 9 Pro XL's 9:20 OLED display), with explicit top/bottom safe insets for the camera cutout and
@@ -29,18 +29,8 @@ def formatSats (sats : Nat) : String :=
 private def truncStr (s : String) (maxLen : Nat) : String :=
   if s.length ≤ maxLen then s else (s.take (maxLen - 3)).toString ++ "..."
 
-private def wrapLines (s : String) (cols : Nat) (maxLines : Nat) : List String := Id.run do
-  if cols == 0 then return []
-  let cs := s.toList
-  let mut out : List String := []
-  let mut rem := cs
-  let mut k := 0
-  while !rem.isEmpty && k < maxLines do
-    let chunk := rem.take cols
-    rem := rem.drop cols
-    out := out ++ [String.ofList chunk]
-    k := k + 1
-  return out
+private def wrapLines (s : String) (cols : Nat) (maxLines : Nat) : List String :=
+  (wrapChars cols maxLines s.toList).map String.ofList
 
 /-- Draws the LCARS chrome frame: top elbow, header title bar, segmented left command rail, status bar,
 and bottom elbow. Returns the usable content rectangle `(cx, cy, cw, ch)`. -/
@@ -84,20 +74,20 @@ private def lcarsChrome (w h topInset bottomInset : Nat) (pal : Palette) (net : 
     .textCentered { x := w - pad - 96, y := elbowY + 4, w := 96, h := barH - 8 } net.upperName 2 pal.pillFg,
     -- Left rail LCARS telemetry blocks
     .rect { x := pad, y := railTop, w := railW, h := seg1 } pal.secondary,
-    .textCentered { x := pad, y := railTop + 8, w := railW, h := 22 } "47-01" 2 pal.pillFg,
+    .textCentered { x := pad, y := railTop + 8, w := railW, h := 22 } "VAULT" 2 pal.pillFg,
     .textCentered { x := pad, y := railTop + 32, w := railW, h := 22 } (if unlocked then "OPEN" else "LOCK") 2 pal.pillFg,
     .rect { x := pad, y := railTop + seg1 + 6, w := railW, h := seg2 } pal.accent,
     .textCentered { x := pad, y := railTop + seg1 + 14, w := railW, h := 22 } "SECP" 2 pal.pillFg,
     .textCentered { x := pad, y := railTop + seg1 + 38, w := railW, h := 22 } "CT-OK" 2 pal.pillFg,
     .rect { x := pad, y := railTop + seg1 + seg2 + 12, w := railW, h := seg3 } pal.primary,
-    .textCentered { x := pad, y := railTop + seg1 + seg2 + 20, w := railW, h := 22 } "0-OS" 2 pal.pillFg,
+    .textCentered { x := pad, y := railTop + seg1 + seg2 + 20, w := railW, h := 22 } "NO OS" 2 pal.pillFg,
     -- Status strip
     .pill { x := contentX, y := statusY, w := contentW, h := statusH } statusBg 12,
     .textCentered { x := contentX + 6, y := statusY, w := contentW - 12, h := statusH } (truncStr statusMsg 32) 2 statusFg,
     -- Bottom LCARS elbow
     .elbowBottom pad footY railW footBarH 28 18 topBarTotalW pal.secondary pal.bg,
     .rect { x := headerRightX + 2, y := footY + 18, w := 310, h := footBarH } pal.bg,
-    .text (headerRightX + 12) (footY + 26) "SILO TRICORDER // LEAN 4" 2 Color.dimText
+    .text (headerRightX + 12) (footY + 26) "SILO SIGNER // LEAN 4" 2 Color.dimText
   ]
   (chrome, { x := contentX, y := bodyY, w := contentW, h := bodyH })
 
@@ -140,7 +130,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     | .setupRestore entered _ => s!"RESTORE {entered.size}/24"
     | .setupPin _ none _ => "SET PIN"
     | .setupPin _ (some _) _ => "CONFIRM PIN"
-    | .home => "TRICORDER"
+    | .home => "HOME"
     | .keys _ => "PUBLIC KEYS"
     | .inbox _ => "AIR-GAP INBOX"
     | .reviewDescriptor .. => "VERIFY WALLET"
@@ -161,8 +151,8 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
 
   | .setupChoice =>
     [ .pill { x := cx, y := cy, w := cw, h := 148 } pal.surface 16,
-      .text (cx + 16) (cy + 18) "STARFLEET SILO SIGNER" 3 pal.highlight,
-      .text (cx + 16) (cy + 58) "ZERO JAVA // VERIFIED LEAN 4" 2 pal.accent,
+      .text (cx + 16) (cy + 18) "SILO SIGNER" 3 pal.highlight,
+      .text (cx + 16) (cy + 58) "OVERRIDE KEY // LEAN 4" 2 pal.accent,
       .text (cx + 16) (cy + 86) "SECPCT CONSTANT-TIME CURVE" 2 pal.fg,
       .text (cx + 16) (cy + 114) s!"NETWORK: {m.network.upperName} (AIR-GAPPED)" 2 pal.primary,
       .button .setupGenerate { x := cx, y := cy + 178, w := cw, h := 92 } "GENERATE NEW 24 WORDS" pal.primary pal.pillFg 3 24,
@@ -253,15 +243,15 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     [ .button .abortReview { x := cx, y := cy + ch - 68, w := cw, h := 62 } "ABORT SETUP" pal.alert Color.white 3 18 ]
 
   | .home =>
-    let (fpStr, appStr) := match m.secrets with
-      | some (id, _) => (id.fingerprintHex.toUpper, truncStr id.approverPubKeyHex.toUpper 20)
-      | none => ("LOCKED", "LOCKED")
+    let fpStr := match m.secrets with
+      | some (id, _) => id.fingerprintHex.toUpper
+      | none => "LOCKED"
     let (wKind, wAddr) := match m.wallet with
       | some wal => (wal.kindLabel, truncStr wal.firstAddress 28)
       | none => ("NONE REGISTERED", "DROP INBOX/DESCRIPTOR.TXT")
     [ .pill { x := cx, y := cy, w := cw, h := 148 } pal.surface 16,
       .text (cx + 14) (cy + 14) s!"MASTER FP:  {fpStr}" 2 pal.highlight,
-      .text (cx + 14) (cy + 42) s!"APPROVER:   {appStr}" 2 pal.accent,
+      .text (cx + 14) (cy + 42) "ROLE:       OVERRIDE KEY" 2 pal.accent,
       .text (cx + 14) (cy + 74) s!"WALLET:     {wKind}" 2 pal.primary,
       .text (cx + 14) (cy + 102) wAddr 2 pal.fg,
       .button .navInbox { x := cx, y := cy + 174, w := cw, h := 88 } "SCAN AIR-GAP INBOX" pal.primary pal.pillFg 3 22,
@@ -270,18 +260,15 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
       .button .lockNow { x := cx, y := cy + ch - 84, w := cw, h := 78 } "LOCK & WIPE RAM" pal.alert Color.white 3 22 ]
 
   | .keys tab => Id.run do
-    let thirdW := (cw - 16) / 3
+    let halfTab := (cw - 8) / 2
     let mut cmds : List DrawCmd := [
-      .button (.keysTab 0) { x := cx, y := cy, w := thirdW, h := 56 } "OVERRIDE"
+      .button (.keysTab 0) { x := cx, y := cy, w := halfTab, h := 56 } "OVERRIDE KEY"
         (if tab == 0 then pal.primary else pal.surface) (if tab == 0 then pal.pillFg else pal.fg) 2 14,
-      .button (.keysTab 1) { x := cx + thirdW + 8, y := cy, w := thirdW, h := 56 } "APPROVER"
-        (if tab == 1 then pal.primary else pal.surface) (if tab == 1 then pal.pillFg else pal.fg) 2 14,
-      .button (.keysTab 2) { x := cx + 2 * (thirdW + 8), y := cy, w := thirdW, h := 56 } "ADDR 0"
-        (if tab == 2 then pal.primary else pal.surface) (if tab == 2 then pal.pillFg else pal.fg) 2 14
+      .button (.keysTab 1) { x := cx + halfTab + 8, y := cy, w := halfTab, h := 56 } "ADDRESS 0"
+        (if tab == 1 then pal.primary else pal.surface) (if tab == 1 then pal.pillFg else pal.fg) 2 14
     ]
     let (hdr, payload) := match m.secrets, tab with
       | some (id, _), 0 => ("OVERRIDE XPUB EXPRESSION", id.overrideKeyExpression)
-      | some (id, _), 1 => ("APPROVER X-ONLY PUBKEY", id.approverPubKeyHex)
       | _, _ =>
         match m.wallet with
         | some wal => (s!"{wal.kindLabel} RECEIVE #0", wal.firstAddress)
@@ -298,7 +285,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     let btnY := cy + ch - 80
     let halfW := (cw - 12) / 2
     cmds := cmds ++ [
-      .button .navHome { x := cx, y := btnY, w := halfW, h := 74 } "BRIDGE" pal.secondary pal.pillFg 3 20,
+      .button .navHome { x := cx, y := btnY, w := halfW, h := 74 } "HOME" pal.secondary pal.pillFg 3 20,
       .button .exportKeys { x := cx + halfW + 12, y := btnY, w := halfW, h := 74 } "EXPORT FILE" pal.primary pal.pillFg 3 20
     ]
     return cmds
@@ -321,11 +308,9 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
         let kindTag := match e.kind with
           | .descriptor => "[DESC] "
           | .overridePsbt => "[PSBT] "
-          | .approvePsbt => "[APPR] "
         let col := match e.kind with
           | .descriptor => pal.secondary
           | .overridePsbt => pal.primary
-          | .approvePsbt => pal.accent
         cmds := cmds ++ [
           .button (.openInboxItem i) { x := cx, y := cy + 36 + i * 82, w := cw, h := 72 }
             (truncStr (kindTag ++ e.fileName.toUpper) 26) col pal.pillFg 2 18
@@ -333,7 +318,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     let btnY := cy + ch - 80
     let halfW := (cw - 12) / 2
     cmds := cmds ++ [
-      .button .navHome { x := cx, y := btnY, w := halfW, h := 74 } "BRIDGE" pal.secondary pal.pillFg 3 20,
+      .button .navHome { x := cx, y := btnY, w := halfW, h := 74 } "HOME" pal.secondary pal.pillFg 3 20,
       .button .scanInbox { x := cx + halfW + 12, y := btnY, w := halfW, h := 74 } "RESCAN" pal.primary pal.pillFg 3 20
     ]
     return cmds
@@ -371,39 +356,58 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
       .text (cx + 12) (cy + 66)
         (match tx.leaving with
          | some lv => s!"LEAVING: {formatSats lv}"
-         | none => s!"INPUTS: {tx.inputCount} (APPROVER MODE)") 2 pal.highlight,
+         | none => s!"INPUTS: {tx.inputCount}") 2 pal.highlight,
       .text (cx + 12) (cy + 94)
         (match tx.fee with
          | some fee => s!"FEE: {formatSats fee}  IN: {tx.inputCount}"
          | none => s!"OUTPUTS: {tx.outputs.size}") 2 pal.accent
     ]
-    let maxOuts := min 4 tx.outputs.size
+    -- Every output is on exactly one page, with its whole address: three lines of 30 hold the longest
+    -- address there is (90 characters, the limit of bech32).
+    let pages := tx.pageCount
+    let page := min m.reviewPage (pages - 1)
+    let first := page * outputsPerPage
+    let last := min (first + outputsPerPage) tx.outputs.size
     let mut oy := cy + 148
-    for i in [0:maxOuts] do
+    for i in [first:last] do
       let o := tx.outputs[i]!
       let badge := if o.isChange then "CHANGE (OURS)" else "EXTERNAL PAY"
       let bCol := if o.isChange then pal.ok else pal.alert
-      let addrLines := wrapLines o.address 30 2
+      let addrLines := wrapLines o.address 30 3
       cmds := cmds ++ [
-        .pill { x := cx, y := oy, w := cw, h := 104 } pal.surface 12,
-        .text (cx + 12) (oy + 10) s!"OUT {i + 1}: {badge}" 2 bCol,
+        .pill { x := cx, y := oy, w := cw, h := 124 } pal.surface 12,
+        .text (cx + 12) (oy + 10) s!"OUT {i + 1} OF {tx.outputs.size}: {badge}" 2 bCol,
         .text (cx + 12) (oy + 36) (formatSats o.sats) 2 pal.highlight,
         .text (cx + 12) (oy + 62) (addrLines[0]?.getD "") 2 pal.fg,
-        .text (cx + 12) (oy + 82) (addrLines[1]?.getD "") 2 pal.fg
+        .text (cx + 12) (oy + 82) (addrLines[1]?.getD "") 2 pal.fg,
+        .text (cx + 12) (oy + 102) (addrLines[2]?.getD "") 2 pal.fg
       ]
-      oy := oy + 114
+      oy := oy + 134
     let btnY := cy + ch - 84
     let halfW := (cw - 12) / 2
-    if !armed then
-      cmds := cmds ++ [
-        .button .abortReview { x := cx, y := btnY, w := halfW, h := 78 } "ABORT" pal.secondary pal.pillFg 3 20,
-        .button .armSign { x := cx + halfW + 12, y := btnY, w := halfW, h := 78 } "ARM SIGNER" pal.primary pal.pillFg 3 20
-      ]
-    else
+    if armed then
       cmds := cmds ++ [
         .button .abortReview { x := cx, y := btnY, w := halfW, h := 78 } "CANCEL" pal.secondary pal.pillFg 3 20,
         .button .confirmSign { x := cx + halfW + 12, y := btnY, w := halfW, h := 78 } "SIGN NOW" pal.alert Color.white 3 20
       ]
+    else
+      -- The first button is where the cursor starts: the next page while there is one, and never the arming.
+      if pages > 1 then
+        let pagerY := btnY - 86
+        if tx.isLastPage page then
+          cmds := cmds ++ [
+            .button .reviewPrevPage { x := cx, y := pagerY, w := cw, h := 74 } s!"BACK TO PAGE {page} OF {pages}" pal.secondary pal.pillFg 2 20 ]
+        else
+          cmds := cmds ++ [
+            .button .reviewNextPage { x := cx, y := pagerY, w := halfW, h := 74 } s!"NEXT {page + 2} OF {pages}" pal.primary pal.pillFg 2 20 ] ++
+            (if page > 0 then
+              [ .button .reviewPrevPage { x := cx + halfW + 12, y := pagerY, w := halfW, h := 74 } "PREVIOUS" pal.secondary pal.pillFg 2 20 ]
+             else [])
+      cmds := cmds ++ [
+        .button .abortReview { x := cx, y := btnY, w := halfW, h := 78 } "ABORT" pal.secondary pal.pillFg 3 20 ] ++
+        (if tx.isLastPage page then
+          [ .button .armSign { x := cx + halfW + 12, y := btnY, w := halfW, h := 78 } "ARM SIGNER" pal.primary pal.pillFg 3 20 ]
+         else [])
     return cmds
 
   | .signed res => Id.run do
@@ -424,7 +428,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     let btnY := cy + ch - 80
     let halfW := (cw - 12) / 2
     cmds := cmds ++ [
-      .button .navHome { x := cx, y := btnY, w := halfW, h := 74 } "BRIDGE" pal.primary pal.pillFg 3 20,
+      .button .navHome { x := cx, y := btnY, w := halfW, h := 74 } "HOME" pal.primary pal.pillFg 3 20,
       .button .lockNow { x := cx + halfW + 12, y := btnY, w := halfW, h := 74 } "LOCK NOW" pal.alert Color.white 3 20
     ]
     return cmds
@@ -443,12 +447,12 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
       .text (cx + 14) (cy + 48) "SELF-TEST DIGEST:" 2 pal.accent,
       .text (cx + 14) (cy + 74) (truncStr digest 30) 2 pal.ok,
       .text (cx + 14) (cy + 110) s!"BIG-NUMBERS: {bigStr}" 2 bigCol,
-      .text (cx + 14) (cy + 144) "OS GETRANDOM SAMPLE:" 2 pal.accent,
+      .text (cx + 14) (cy + 144) "HARDWARE RANDOM SAMPLE:" 2 pal.accent,
       .text (cx + 14) (cy + 170) (truncStr entropyHex 30) 2 pal.fg,
       .text (cx + 14) (cy + 204) "ALLOCATOR: MINI/ALLOC ZERO-ON-FREE" 2 Color.dimText,
       .button .runSelfTest { x := cx, y := cy + 266, w := cw, h := 74 } "RE-RUN SELF-TEST & ENTROPY" pal.primary pal.pillFg 2 20,
       .button .runBigTest { x := cx, y := cy + 356, w := cw, h := 74 } "RUN BIG-NUMBER VERIFY" pal.accent pal.pillFg 2 20,
-      .button .navHome { x := cx, y := cy + ch - 80, w := cw, h := 74 } "RETURN TO BRIDGE" pal.secondary pal.pillFg 3 20 ]
+      .button .navHome { x := cx, y := cy + ch - 80, w := cw, h := 74 } "RETURN HOME" pal.secondary pal.pillFg 3 20 ]
   chrome ++ content
 
 end Tricorder.Ui.View

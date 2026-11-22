@@ -85,7 +85,7 @@ def fillRoundedRect (f : Frame) (x y w h radius : Nat) (color : Color) : Frame :
       out := out.fillRect (x + dx) (y + h - 1 - dy) spanW 1 color
   return out
 
-/-- Iconic Star Trek LCARS top-left sweeping elbow: outer rounded corner + inner concave sweep. -/
+/-- Top-left sweeping elbow: outer rounded corner + inner concave sweep. -/
 def drawLcarsElbowTop (f : Frame) (x y railW barH outerR innerR totalW : Nat) (color bg : Color) : Frame := Id.run do
   let totalH := barH + innerR
   let mut out := f.fillRoundedRect x y totalW totalH outerR color
@@ -108,7 +108,7 @@ def drawLcarsElbowTop (f : Frame) (x y railW barH outerR innerR totalW : Nat) (c
       out := out.fillRect (cutX + dx) (cutY + dy) (innerR - dx) 1 bg
   return out
 
-/-- Iconic Star Trek LCARS bottom-left sweeping elbow. -/
+/-- Bottom-left sweeping elbow. -/
 def drawLcarsElbowBottom (f : Frame) (x y railW barH outerR innerR totalW : Nat) (color bg : Color) : Frame := Id.run do
   let totalH := barH + innerR
   let mut out := f.fillRoundedRect x y totalW totalH outerR color

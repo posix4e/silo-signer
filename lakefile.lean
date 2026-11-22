@@ -1,8 +1,8 @@
 import Lake
 open Lake DSL
 
-/-! Tricorder OS: a 100% bare-metal, formally verified AArch64 Lean 4 offline Bitcoin & Silo
-hardware signer with a Star Trek LCARS interface targeting Pixel 9 Pro XL (`komodo` / Tensor G4). -/
+/-! silo-signer: the override key of a silo wallet, as the whole software of a Pixel 9 Pro XL (`komodo`) and
+under QEMU. "Tricorder" is its working name in the code. -/
 
 package tricorder
 
@@ -89,6 +89,10 @@ lean_lib Kernel
 
 @[default_target]
 lean_lib Tricorder
+
+/-- A payment the tests review and sign. -/
+lean_lib TestsFixture where
+  roots := #[`Tests.Fixture]
 
 /-- Proof gate checked at build time (never imported by the runtime binary). -/
 @[default_target]

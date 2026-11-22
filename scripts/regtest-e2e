@@ -5,8 +5,6 @@
 #    - Funds wallet, creates PSBT, CORE1 signs + TRICORDER signs, finalizes, broadcasts, confirms in a block!
 # 2. SegWit v0 2-of-3: wsh(sortedmulti(2, CORE1, TRICORDER, CORE2))
 #    - Same full cycle including full nonWitnessUTXO prevtx verification & ECDSA signing!
-# 3. Silo Approver (`silo/approve`):
-#    - Signs a real Bitcoin Core PSBT txid and confirms valid 64-byte BIP340 approval line!
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,9 +52,7 @@ c2_pub="$(core_xpub_expr core2)"
 seed_hex="0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
 tri_keys="$("$cli" keys regtest "$seed_hex")"
 tri_pub="$(printf '%s\n' "$tri_keys" | sed -n '1p')"
-tri_approver="$(printf '%s\n' "$tri_keys" | sed -n '2p')"
 echo "ok    Tricorder override key: $tri_pub"
-echo "ok    Tricorder approver key: $tri_approver"
 
 nums="50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
 
@@ -94,13 +90,6 @@ fin_tr="$(bcli finalizepsbt "$psbt_tr_both")"
 txid_tr="$(bcli sendrawtransaction "$(printf '%s' "$fin_tr" | jq -r '.hex')")"
 bcli -rpcwallet=miner generatetoaddress 1 "$miner_addr" >/dev/null
 echo "ok    Taproot 2-of-3 co-signed by Tricorder & confirmed in regtest block: $txid_tr"
-
-# Also test Silo Approver signing on the real Bitcoin Core PSBT!
-appr_line="$("$cli" sign-approve regtest "$seed_hex" "$psbt_tr")"
-case "$appr_line" in
-  approval\ *) echo "ok    Silo Approver BIP340 signature: ${appr_line:0:40}..." ;;
-  *) echo "FAIL bad approval output: $appr_line" >&2; exit 1 ;;
-esac
 
 # ---- 2. SegWit v0 2-of-3 co-sign ----
 sw_body="wsh(sortedmulti(2,$c1_pub/<0;1>/*,$tri_pub/<0;1>/*,$c2_pub/<0;1>/*))"

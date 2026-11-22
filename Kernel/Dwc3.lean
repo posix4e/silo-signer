@@ -78,7 +78,7 @@ def trbIoc : UInt32 := (1 : UInt32) <<< 11
 /-! ## Pure USB 2.0 Descriptors & SETUP Request Decoder (Formally Verified!) -/
 
 def usbVendorId : UInt16 := 0x1209   -- pid.codes open hardware test VID
-def usbProductId : UInt16 := 0x4701  -- Star Trek Tricorder 47-01
+def usbProductId : UInt16 := 0x4701  -- on the pid.codes test vendor id
 
 /-- 18-byte USB 2.0 Device Descriptor (`VID=0x1209`, `PID=0x4701`, 64-byte EP0). -/
 def deviceDescriptor : ByteArray := ByteArray.mk #[

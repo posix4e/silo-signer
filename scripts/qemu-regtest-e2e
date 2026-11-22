@@ -10,7 +10,6 @@ End-to-end Bare-Metal AArch64 Tricorder OS verification in QEMU + live Bitcoin C
      zero-FS 2-slot `VaultStore` recovery -> wrong PIN rejected -> right PIN unlocks!
   5. Live Bitcoin Core regtest co-signing over `Kernel.Wire` with physical-button two-step arm/confirm:
      - Taproot 2-of-3 `tr(NUMS, sortedmulti_a(2, ...))` co-signed & mined in a block!
-     - Silo Approver `silo/approve` BIP 340 signed on a real PSBT!
      - SegWit v0 2-of-3 `wsh(sortedmulti(2, ...))` (full `nonWitnessUTXO` check) co-signed & mined!
   6. Captures live QEMU `ramfb` screenshots (`screendump`) and verifies QR scannability!
 """
@@ -34,7 +33,6 @@ OP_GET_STATUS = 0x02
 OP_GET_KEYS = 0x03
 OP_PUSH_DESC = 0x04
 OP_PUSH_OVERRIDE = 0x05
-OP_PUSH_APPROVE = 0x06
 OP_POLL_RESULT = 0x07
 OP_INJECT_KEY = 0x10
 OP_RESP_OK = 0x80
@@ -281,17 +279,14 @@ def main():
         assert keys_after_reboot == keys_before_reboot, "Keys differed after reboot!"
         print("ok    Correct PIN unlocked persisted vault with identical keys after cold reboot!")
 
-        # Parse Tricorder's Override xpub & Approver pubkey from GET_KEYS output
+        # The signer's override key, from GET_KEYS
         tri_pub = None
-        tri_approver = None
         for line in keys_after_reboot.splitlines():
             if line.startswith("override_key "):
                 tri_pub = line.split(" ", 1)[1].strip()
-            elif line.startswith("approver_key "):
-                tri_approver = line.split(" ", 1)[1].strip()
-        assert tri_pub and tri_approver, keys_after_reboot
+        assert tri_pub, keys_after_reboot
+        assert "approver" not in keys_after_reboot, keys_after_reboot
         print(f"ok    Bare-metal Override key: {tri_pub[:48]}...")
-        print(f"ok    Bare-metal Approver key: {tri_approver}")
 
         # ---- 4. Start live Bitcoin Core regtest on Mac host ----
         subprocess.run([
@@ -357,6 +352,14 @@ def main():
 
         qemu.rpc_ok(OP_PUSH_OVERRIDE, psbt_tr_c1.encode())
         assert qemu.rpc_ok(OP_GET_STATUS).startswith("reviewTx|1|1|0|")
+        # While a payment is on the screen the host can put nothing in its place, and nothing is signed yet.
+        for op, what in ((OP_PUSH_OVERRIDE, psbt_tr_c1.encode()), (OP_PUSH_DESC, tr_desc.encode())):
+            rop, body = qemu.rpc(op, what)
+            assert rop != OP_RESP_OK and body == b"BUSY_REVIEWING", (rop, body)
+        rop, body = qemu.rpc(OP_POLL_RESULT)
+        assert rop != OP_RESP_OK and body == b"NO_SIGNATURE_READY", (rop, body)
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("reviewTx|1|1|0|")
+        print("ok    A payment under review cannot be replaced from the host, and nothing is signed before the buttons")
         # Physical two-step arm & sign (reviewTx: 0=ABORT, 1=ARM SIGN; reviewTxArmed: 0=CANCEL, 1=SIGN NOW)
         qemu.move_and_select(1)
         assert qemu.rpc_ok(OP_GET_STATUS).startswith("reviewTxArmed|1|1|1|")
@@ -367,19 +370,10 @@ def main():
         assert fin_tr["complete"], fin_tr
         txid_tr = bcli("sendrawtransaction", fin_tr["hex"])
         bcli("generatetoaddress", "1", miner_addr, wallet="miner")
+        qemu.screendump(os.path.join(SHOTS_DIR, "03_qemu_signed_qr.ppm"))
         print(f"ok    BARE-METAL Taproot 2-of-3 co-signed & MINED in regtest block: {txid_tr}")
 
-        # ---- 6. Silo Approver (`silo/approve` BIP 340) + live QEMU ramfb QR screenshot! ----
-        qemu.move_and_select(0)  # back to home
-        qemu.rpc_ok(OP_PUSH_APPROVE, psbt_tr.encode())
-        qemu.move_and_select(1)  # ARM
-        qemu.move_and_select(1)  # SIGN NOW
-        appr_line = qemu.rpc_ok(OP_POLL_RESULT)
-        assert appr_line.startswith("approval ") and len(appr_line) == len("approval ") + 128, appr_line
-        qemu.screendump(os.path.join(SHOTS_DIR, "03_qemu_signed_qr.ppm"))
-        print(f"ok    BARE-METAL Silo Approver BIP340 signed & QR rendered: {appr_line[:40]}...")
-
-        # ---- 7. SegWit v0 2-of-3 co-signing (full nonWitnessUTXO prevtx verification!) ----
+        # ---- 6. SegWit v0 2-of-3 co-signing (full nonWitnessUTXO prevtx verification!) ----
         qemu.move_and_select(0)  # home
         sw_desc = add_checksum(f"wsh(sortedmulti(2,{c1_pub}/<0;1>/*,{tri_pub}/<0;1>/*,{c2_pub}/<0;1>/*))")
         sw_ext = add_checksum(f"wsh(sortedmulti(2,{c1_pub}/0/*,{tri_pub}/0/*,{c2_pub}/0/*))")
@@ -431,7 +425,7 @@ import CoreImage
 let det = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])!
 let expected = [
     ("{png_keys}", "{tri_pub}"),
-    ("{png_signed}", "{appr_line}")
+    ("{png_signed}", "{psbt_tr_both}")
 ]
 for (path, want) in expected {{
     let img = CIImage(contentsOf: URL(fileURLWithPath: path))!

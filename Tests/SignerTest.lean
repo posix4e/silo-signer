@@ -6,10 +6,12 @@ import Tricorder.Crypto.Key
 import Tricorder.Signer.Descriptor
 import Tricorder.Signer.Review
 import Tricorder.Signer.Sign
+import Tests.Fixture
+import Tricorder.Ui.Layout
 import Tricorder.Signer.Protocol
 import Tricorder.Qr.Encode
 
-/-! # Pure tests for Tricorder's crypto, vault, Silo override/approver signer, and QR encoder -/
+/-! # Pure tests for the crypto, the vault, the override key's review and signing, and the QR encoder -/
 
 open Tricorder Tricorder.Signer Winnow Winnow.Keys
 
@@ -53,7 +55,7 @@ def main : IO UInt32 := do
     check fails "Vault refuses tampered GCM tag" (!(Vault.openVault .signet "170147" tampered).isOk)
     check fails "Vault rejects short PIN (< 6)" (!(Vault.sealVault .signet "12345" words salt nonce 10).isOk)
 
-  -- 3. Identity derivation (Override + Approver disjoint keys)
+  -- 3. Identity derivation
   let .ok idA := Identity.ofWords words .regtest | do println "FAIL idA"; return 1
   let entB := ByteArray.mk ((Array.range 32).map (fun i => (i + 1).toUInt8))
   let entC := ByteArray.mk ((Array.range 32).map (fun i => (i + 99).toUInt8))
@@ -64,9 +66,6 @@ def main : IO UInt32 := do
   check fails "Override key expression has origin & tpub"
     (idA.overrideKeyExpression.startsWith s!"[{idA.fingerprintHex}/86h/1h/0h]tpub")
     idA.overrideKeyExpression
-  check fails "Approver pubkey is 32-byte x-only hex (64 chars)" (idA.approverPubKeyHex.length == 64)
-  check fails "Override and Approver keys are distinct"
-    (idA.approverSecret.xonly != idA.overrideSecret.xonly)
 
   -- 4. Descriptor registration (Taproot 2-of-3 & SegWit v0 2-of-3)
   let trBody := s!"tr(50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0,sortedmulti_a(2,{idA.overrideKeyExpression}/<0;1>/*,{idB.overrideKeyExpression}/<0;1>/*,{idC.overrideKeyExpression}/<0;1>/*))"
@@ -88,29 +87,40 @@ def main : IO UInt32 := do
   let foreignBody := s!"wsh(sortedmulti(2,{idB.overrideKeyExpression}/<0;1>/*,{idC.overrideKeyExpression}/<0;1>/*))"
   check fails "Refuses descriptor without our Override key" (!(registerDescriptor idA foreignBody).isOk)
 
-  -- 5. Silo Approver review & BIP340 sign/verify
-  let .ok dstScript := AddressDecoder.scriptPubKey trAddr .regtest | do println "FAIL dstScript"; return 1
-  let sampleTx : Transaction :=
-    { version := 2
-      inputs := #[{ previousOutput := ⟨zero32, 0⟩, scriptSig := .empty, sequence := 0xfffffffd }]
-      outputs := #[{ value := 250000, scriptPubKey := dstScript }]
-      locktime := 0 }
-  let .ok psbt := PSBT.ofV0 sampleTx #[] #[{ pairs := #[] }] #[{ pairs := #[] }]
-    | do println "FAIL psbt"; return 1
-  match reviewApprover idA none psbt "approve.b64" with
-  | .error e => check fails "Approver review" false e
-  | .ok rev =>
-    check fails "Approver review decodes recipient address & amount"
-      (rev.outputs.size == 1 && rev.outputs[0]!.sats == 250000 && rev.outputs[0]!.address.startsWith "bcrt1p")
-    let fresh := ByteArray.mk ((Array.range 32).map (fun i => (i * 13 + 5).toUInt8))
-    match signReviewed idA rev fresh with
-    | .error e => check fails "Approver sign" false e
-    | .ok res =>
-      check fails "Approver signature verifies against silo/approve message"
-        (verifyApprovalLine idA.approverPubKeyHex sampleTx.txid res.payloadText)
-        res.payloadText
-      check fails "Approver signature fails under wrong pubkey"
-        (!verifyApprovalLine idB.approverPubKeyHex sampleTx.txid res.payloadText)
+  -- 5. The override key's review of a payment, and its signature
+  match Tests.Fixture.overridePayment idA idB idC 5 190000 with
+  | .error e => check fails "A payment of five outputs is made for the tests" false e
+  | .ok (wallet, psbt, _) =>
+    match reviewOverride idA wallet psbt "payment.psbt" with
+    | .error e => check fails "Override review" false e
+    | .ok rev =>
+      check fails "The review has every output, none of them the wallet's own by its say-so"
+        (rev.outputs.size == 5 && rev.outputs.all (fun o => o.sats == 190000 && !o.isChange))
+      check fails "What leaves is the inputs less nothing, and the fee is the rest"
+        (rev.leaving == some 1000000 && rev.fee == some 50000)
+      check fails "Five outputs are two pages of three, and only the second is the last"
+        (rev.pageCount == 2 && !rev.isLastPage 0 && rev.isLastPage 1)
+      check fails "Every address fits whole in three lines of 30"
+        (rev.outputs.all fun o => o.address.length ≤ 90 &&
+          String.ofList (Tricorder.Ui.wrapChars 30 3 o.address.toList).flatten == o.address)
+      let fresh := ByteArray.mk ((Array.range 32).map (fun i => (i * 13 + 5).toUInt8))
+      match signReviewed idA rev fresh with
+      | .error e => check fails "Override sign" false e
+      | .ok res =>
+        let signedOk := match PSBT.ofBase64 res.payloadText with
+          | .ok signed => (signed.inputs[0]?.map fun i => i.partialSignatures.size == 1).getD false
+          | .error _ => false
+        check fails "The signed payment carries the override key's signature" signedOk
+    -- A fee over a tenth of the inputs is refused
+    match Tests.Fixture.overridePayment idA idB idC 1 800000 with
+    | .ok (w2, greedy, _) =>
+      check fails "A payment whose fee is over a tenth of its inputs is refused" (!(reviewOverride idA w2 greedy "greedy.psbt").isOk)
+    | .error e => check fails "A greedy payment is made for the tests" false e
+    -- Another signer's wallet does not review it
+    check fails "A signer whose key is not at the claimed place refuses the payment"
+      (match registerDescriptor idB (Tests.Fixture.descriptor idA idB idC) with
+       | .ok wB => !(reviewOverride idB wB psbt "payment.psbt").isOk
+       | .error _ => false)
 
   -- 6. Pure-Lean QR encoder across small (v1), medium (override key), and large (PSBT-size) payloads
   let q1 := Qr.encode "TRICORDER"

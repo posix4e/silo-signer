@@ -4,23 +4,21 @@ import Secp.Sha256
 import Tricorder.Crypto.Key
 import Tricorder.Signer.Descriptor
 
-/-! # Transaction and PSBT Review (Override & Approver roles)
+/-! # Transaction and PSBT review, for the override key
 
 Every byte of a PSBT is parsed and checked in Lean before anything is displayed or signed:
 - **Override Taproot**: validates every input against the registered Taproot descriptor (`reviewSpend`),
   verifies change outputs by re-deriving descriptor scripts, and renders exact recipient addresses.
 - **Override SegWit v0**: requires every input's full `nonWitnessUTXO` previous transaction and verifies
   `prevTx.txid == previousTxid` (preventing BIP 143 fee-inflation lies), re-derives every witness script,
-  enforces `SIGHASH_ALL`, and caps fee ≤ 10% of inputs.
-- **Approver**: parses the unsigned transaction, displays EVERY output address/script and amount, and
-  fixes the exact `silo/approve` BIP 340 message digest over `tx.txid`. -/
+  enforces `SIGHASH_ALL`, and caps fee ≤ 10% of inputs. -/
 
 namespace Tricorder.Signer
 
 open Winnow Winnow.Keys
 open Winnow.Tx (BitcoinNetwork)
 
-/-- One output shown to the human on the LCARS Transaction Review screen. -/
+/-- One output shown to its holder on the transaction review screen. -/
 structure ReviewedOutput where
   address : String
   sats : Nat
@@ -39,7 +37,6 @@ structure SegwitCoin where
 inductive ReviewKind where
   | overrideTaproot (coins : Array WalletUTXO) (tx : Transaction) (spent : Array SighashBIP341.SpentOutput)
   | overrideSegwit (coins : Array SegwitCoin) (tx : Transaction)
-  | approver (tx : Transaction)
 
 /-- Complete reviewed transaction ready for human inspection and explicit confirmation. -/
 structure ReviewedTx where
@@ -47,7 +44,7 @@ structure ReviewedTx where
   sourceFile : String
   /-- Display txid (reversed hex, matching Bitcoin Core / explorers). -/
   txidDisplay : String
-  /-- Internal txid bytes (32 bytes, committed by `silo/approve`). -/
+  /-- Internal txid bytes (32 bytes). -/
   txidBytes : ByteArray
   inputCount : Nat
   inputTotal : Option Nat
@@ -58,16 +55,24 @@ structure ReviewedTx where
   psbt : PSBT
   kind : ReviewKind
 
+/-- How many outputs one page of the review screen shows. Every output is on exactly one page, and the
+signer cannot be armed before the last page has been reached (`Tricorder/Proofs/StateProofs.lean`). -/
+def outputsPerPage : Nat := 3
+
+/-- The number of pages a transaction's outputs take: at least one. -/
+def ReviewedTx.pageCount (tx : ReviewedTx) : Nat :=
+  max 1 ((tx.outputs.size + outputsPerPage - 1) / outputsPerPage)
+
+/-- Whether `page` is the last page of `tx`'s outputs. -/
+def ReviewedTx.isLastPage (tx : ReviewedTx) (page : Nat) : Bool :=
+  page + 1 ≥ tx.pageCount
+
 def formatOutputTarget (script : ByteArray) (network : BitcoinNetwork) : String :=
   match AddressDecoder.address script network with
   | some addr => addr
   | none =>
     if script.size ≥ 1 && script[0]! == 0x6a then s!"OP_RETURN ({script.size}B)"
     else s!"SCRIPT:{hexBytes (script.extract 0 (min 20 script.size))}"
-
-/-- `silo/approve` tagged hash matching `silo-on-winnow/Signer/Approval.lean` byte for byte. -/
-def approvalMessage (txid : ByteArray) : ByteArray :=
-  Secp.Sha256.tagged "silo/approve" txid
 
 private def coordinate? (i : Identity) (found : Array (ByteArray × PSBT.KeyOrigin)) : Option (Nat × UInt32) := do
   let acct := Identity.overridePath i.network
@@ -87,7 +92,7 @@ private def claimedTaprootCoins (i : Identity) (psbt : PSBT) : Except String (Ar
     let some vout := input.outputIndex | throw s!"input {k + 1} missing outputIndex"
     let some spent := input.witnessUTXO | throw s!"input {k + 1} missing witnessUTXO"
     let some (chain, index) := coordinate? i input.tapBIP32Derivation
-      | throw s!"input {k + 1} missing this Tricorder's tapBIP32Derivation"
+      | throw s!"input {k + 1} missing this signer's tapBIP32Derivation"
     coins := coins.push
       { txid, vout, amount := spent.amount, scriptPubKey := spent.scriptPubKey
         chain := if chain == 0 then .receive else .change, index, height := 0 }
@@ -173,7 +178,7 @@ def reviewOverrideSegwit (i : Identity) (account : SegwitMultisigAccount) (psbt 
     if seen.contains ⟨txid, vout⟩ then throw s!"input {k + 1} duplicates an earlier outpoint"
     seen := seen.push ⟨txid, vout⟩
     let some (chain, index) := coordinate? i (PSBT.readKeyOrigins input.pairs PSBT.InType.bip32Derivation)
-      | throw s!"input {k + 1} missing this Tricorder's bip32Derivation"
+      | throw s!"input {k + 1} missing this signer's bip32Derivation"
     let spent ← verifiedPrevOutput input k txid vout
     let there ← match SegwitMultisigAccount.resolved account chain index with
       | .ok r => pure r
@@ -232,64 +237,6 @@ def reviewOverride (i : Identity) (w : RegisteredWallet) (psbt : PSBT) (sourceFi
   match w.account with
   | .taproot account => reviewOverrideTaproot i account psbt sourceFile
   | .segwit account => reviewOverrideSegwit i account psbt sourceFile
-
-/-- Reviews a PSBT for Silo Approver signing (`silo/approve` over `tx.txid`).
-If a wallet descriptor is also registered, marks verified change outputs so the approver can distinguish
-change from external recipients. -/
-def reviewApprover (i : Identity) (wallet? : Option RegisteredWallet) (psbt : PSBT) (sourceFile : String) :
-    Except String ReviewedTx := do
-  let tx ← match psbt.unsignedTransaction with
-    | .ok t => pure t
-    | .error e => throw s!"cannot extract unsigned transaction ({e.name})"
-  if tx.inputs.isEmpty then throw "transaction has no inputs"
-  if tx.outputs.isEmpty then throw "transaction has no outputs"
-  let mut outputs : Array ReviewedOutput := #[]
-  let mut returning : Nat := 0
-  let mut outSum : Nat := 0
-  for h : k in [0:tx.outputs.size] do
-    let out := tx.outputs[k]
-    let sats := out.value.toInt.toNat
-    outSum := outSum + sats
-    let mut isChange := false
-    if let some w := wallet? then
-      if h2 : k < psbt.outputs.size then
-        let po := psbt.outputs[k]
-        match w.account with
-        | .taproot acc =>
-          if let some (chain, idx) := coordinate? i po.tapBIP32Derivation then
-            if let .ok addr := acc.address idx chain then
-              if AddressDecoder.address out.scriptPubKey i.network == some addr then
-                isChange := true
-        | .segwit acc =>
-          if let some (chain, idx) := coordinate? i (PSBT.readKeyOrigins po.pairs PSBT.OutType.bip32Derivation) then
-            if let .ok there := SegwitMultisigAccount.resolved acc chain idx then
-              if SegwitMultisigAccount.scriptPubKeyOf there.witnessScript == out.scriptPubKey then
-                isChange := true
-    if isChange then returning := returning + sats
-    outputs := outputs.push
-      { address := formatOutputTarget out.scriptPubKey i.network, sats, isChange }
-  -- Compute input total / fee if every input carries witnessUTXO.
-  let mut knownInputs : Option Nat := some 0
-  for input in psbt.inputs do
-    match knownInputs, input.witnessUTXO with
-    | some acc, some u => knownInputs := some (acc + u.amount.toInt.toNat)
-    | _, _ => knownInputs := none
-  let fee := knownInputs.bind fun tot => if tot ≥ outSum then some (tot - outSum) else none
-  let leaving := knownInputs.map fun tot => tot - returning
-  return {
-    roleLabel := "SILO APPROVER (BIP340)"
-    sourceFile
-    txidDisplay := hexReversed tx.txid
-    txidBytes := tx.txid
-    inputCount := tx.inputs.size
-    inputTotal := knownInputs
-    outputs
-    leaving
-    returning
-    fee
-    psbt
-    kind := .approver tx
-  }
 
 /-- Parses either raw binary PSBT (`psbt\xff`) or Base64 PSBT text. -/
 def parsePsbtBytes (bytes : ByteArray) : Except String PSBT := do

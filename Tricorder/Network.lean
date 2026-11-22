@@ -2,7 +2,7 @@ import Winnow.Tx
 
 /-! # Network configuration and LCARS palettes
 
-One Bitcoin network per build (`regtest`, `signet`, or `mainnet`), each with a distinct Star Trek
+One Bitcoin network per build (`regtest`, `signet`, or `mainnet`), each with a distinct
 LCARS color scheme so networks are visually unmistakable on the bare-metal OLED display. -/
 
 namespace Tricorder
@@ -28,7 +28,7 @@ def greenOk : Color := rgb 80 210 130
 
 end Color
 
-/-- Star Trek LCARS palette for a network build. -/
+/-- Palette for a network build. -/
 structure Palette where
   /-- Primary rail & elbow accent. -/
   primary : Color

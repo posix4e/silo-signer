@@ -61,7 +61,9 @@ def performEffect (m : Model) (eff : Effect) : IO Event := do
   | .unlockVault pin =>
     let some blob ← Platform.readFile? Vault.vaultFile
       | return .hostStatus "VAULT FILE MISSING" true
-    let prevAttempts := Vault.decodeAttempts (← Platform.readFile? Vault.attemptsFile)
+    -- The attempt is counted on disk before the PIN is tried, so that stopping the program buys no free guess.
+    let nextAttempts := Vault.decodeAttempts (← Platform.readFile? Vault.attemptsFile) + 1
+    Platform.writeFile Vault.attemptsFile (Vault.encodeAttempts nextAttempts)
     match Vault.openVault m.network pin blob with
     | .ok words =>
       match Identity.ofWords words m.network.toBitcoin with
@@ -77,14 +79,12 @@ def performEffect (m : Model) (eff : Effect) : IO Event := do
         Platform.writeFile Protocol.keysOutFile (Protocol.formatKeysExport id wallet?).toUTF8
         return .hostUnlockOk words id wallet?
     | .error _ =>
-      let nextAttempts := prevAttempts + 1
       if nextAttempts ≥ Vault.maxFailedAttempts then
         Platform.deleteFile Vault.vaultFile
         Platform.deleteFile Vault.descriptorFile
         Platform.deleteFile Vault.attemptsFile
         return .hostUnlockFailed nextAttempts true
       else
-        Platform.writeFile Vault.attemptsFile (Vault.encodeAttempts nextAttempts)
         return .hostUnlockFailed nextAttempts false
   | .wipeVault =>
     Platform.deleteFile Vault.vaultFile
@@ -98,7 +98,7 @@ def performEffect (m : Model) (eff : Effect) : IO Event := do
     return .hostInboxLoaded entries
   | .loadInboxItem entry =>
     match m.secrets with
-    | none => return .hostStatus "TRICORDER LOCKED" true
+    | none => return .hostStatus "SIGNER LOCKED" true
     | some (id, _) =>
       let some raw ← Platform.readFile? entry.relPath
         | return .hostStatus s!"CANNOT READ {entry.fileName}" true
@@ -120,13 +120,6 @@ def performEffect (m : Model) (eff : Effect) : IO Event := do
             match reviewOverride id w psbt entry.fileName with
             | .ok rev => return .hostTxReviewed rev
             | .error err => return .hostStatus err true
-      | .approvePsbt =>
-        match parsePsbtBytes raw with
-        | .error err => return .hostStatus err true
-        | .ok psbt =>
-          match reviewApprover id m.wallet psbt entry.fileName with
-          | .ok rev => return .hostTxReviewed rev
-          | .error err => return .hostStatus err true
   | .saveDescriptor desc =>
     Platform.writeFile Vault.descriptorFile desc.toUTF8
     if let some (id, _) := m.secrets then

@@ -6,7 +6,7 @@ import Secp.Der
 import Tricorder.Crypto.Key
 import Tricorder.Signer.Review
 
-/-! # Constant-time PSBT and Silo Approval Signing (`SecpCt`)
+/-! # Constant-time PSBT signing (`SecpCt`)
 
 Every signature is produced by `SecpCt` on machine words and immediately verified against the public key
 before leaving Tricorder. -/
@@ -20,7 +20,7 @@ structure SignedResult where
   roleLabel : String
   txidDisplay : String
   outFileName : String
-  /-- Text payload written to `outbox/` and encoded as QR (for approvals or compact PSBTs). -/
+  /-- Text payload written to `outbox/` and encoded as QR: the signed PSBT in base64. -/
   payloadText : String
   /-- Short human-readable summary for the LCARS Signed screen. -/
   summary : String
@@ -100,27 +100,5 @@ def signReviewed (i : Identity) (reviewed : ReviewedTx) (fresh : ByteArray) : Ex
       payloadText := b64
       summary := s!"SIGNED {coins.size} SEGWIT V0 INPUT(S)"
     }
-  | .approver tx =>
-    let msg := approvalMessage tx.txid
-    let some sig := SecpCt.sign i.approverSecret.key msg fresh | throw "approver BIP340 sign failed"
-    unless SecpCt.verify sig msg i.approverSecret.xonly do
-      throw "approver signature self-verify failed"
-    let line := s!"approval {hexBytes sig}"
-    return {
-      roleLabel := reviewed.roleLabel
-      txidDisplay := reviewed.txidDisplay
-      outFileName := "outbox/approval.txt"
-      payloadText := line
-      summary := s!"APPROVAL {hexBytes (sig.extract 0 8)}..."
-    }
-
-/-- Public verifier for a `silo/approve` line (`"approval <128-hex>"`) against an approver x-only pubkey. -/
-def verifyApprovalLine (approverPubHex : String) (txid : ByteArray) (line : String) : Bool :=
-  match unhex? approverPubHex, line.trimAscii.toString.splitOn " " with
-  | some pub, ["approval", sigHex] =>
-    match unhex? sigHex with
-    | some sig => pub.size == 32 && sig.size == 64 && SecpCt.verify sig (approvalMessage txid) pub
-    | none => false
-  | _, _ => false
 
 end Tricorder.Signer

@@ -50,6 +50,8 @@ structure Model where
   wallet : Option RegisteredWallet
   statusMsg : String
   isError : Bool
+  /-- Which page of the outputs the transaction review screen is showing, from 0. -/
+  reviewPage : Nat := 0
 
 inductive Effect where
   | generateSeed
@@ -193,7 +195,7 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
 
   -- Unlocked screens (only active when `m.secrets` is `some`)
   | _, .lockNow =>
-    (lockModel m "TRICORDER LOCKED", [])
+    (lockModel m "SIGNER LOCKED", [])
 
   | _, .navHome =>
     match m.secrets with
@@ -219,7 +221,7 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
 
   | .keys _, .keysTab t =>
     match m.secrets with
-    | some _ => ({ m with screen := .keys (min 2 t), isError := false }, [])
+    | some _ => ({ m with screen := .keys (min 1 t), isError := false }, [])
     | none => (lockModel m "LOCKED", [])
 
   | .keys _, .exportKeys =>
@@ -254,10 +256,30 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
     | none => (lockModel m "LOCKED", [])
 
   -- Two-step transaction signing confirmation: ARM -> CONFIRM SIGN
+  -- Every output is on some page, and the signer is armed only from the last one.
+  | .reviewTx tx false, .reviewNextPage =>
+    match m.secrets with
+    | some _ =>
+      let page := if tx.isLastPage m.reviewPage then m.reviewPage else m.reviewPage + 1
+      ({ m with reviewPage := page, statusMsg := s!"OUTPUTS PAGE {page + 1} OF {tx.pageCount}", isError := false }, [])
+    | none => (lockModel m "LOCKED", [])
+
+  | .reviewTx tx false, .reviewPrevPage =>
+    match m.secrets with
+    | some _ =>
+      let page := m.reviewPage - 1
+      ({ m with reviewPage := page, statusMsg := s!"OUTPUTS PAGE {page + 1} OF {tx.pageCount}", isError := false }, [])
+    | none => (lockModel m "LOCKED", [])
+
   | .reviewTx tx false, .armSign =>
     match m.secrets with
     | some _ =>
-      ({ m with screen := .reviewTx tx true, statusMsg := "ARMED - TAP CONFIRM TO SIGN", isError := false }, [])
+      -- Armed only from the last page of the outputs: before that, the answer is to read on.
+      let last := tx.isLastPage m.reviewPage
+      ({ m with
+          screen := .reviewTx tx last
+          statusMsg := if last then "ARMED - TAP CONFIRM TO SIGN" else "READ EVERY OUTPUT FIRST"
+          isError := !last }, [])
     | none => (lockModel m "LOCKED", [])
 
   | .reviewTx tx true, .confirmSign =>
@@ -283,7 +305,7 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
 
   | .diagnostics _ _ _, .drawEntropy =>
     match m.secrets with
-    | some _ => ({ m with statusMsg := "SAMPLING GETRANDOM...", isError := false }, [.runDiagnostics false])
+    | some _ => ({ m with statusMsg := "SAMPLING HARDWARE RANDOM...", isError := false }, [.runDiagnostics false])
     | none => (lockModel m "LOCKED", [])
 
   | _, _ => (m, [])
@@ -348,7 +370,7 @@ def update (m : Model) (ev : Event) : Model × List Effect :=
   | .hostTxReviewed tx =>
     match m.secrets with
     | some _ =>
-      ({ m with screen := .reviewTx tx false, statusMsg := "INSPECT EVERY OUTPUT CAREFULLY", isError := false }, [])
+      ({ m with screen := .reviewTx tx false, reviewPage := 0, statusMsg := "INSPECT EVERY OUTPUT CAREFULLY", isError := false }, [])
     | none => (lockModel m "LOCKED", [])
   | .hostSigned res =>
     match m.secrets with

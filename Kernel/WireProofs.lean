@@ -4,11 +4,13 @@ import Kernel.Wire
 
 Proves:
 1. `op_roundtrip`: every `Op` byte-encoding round-trips cleanly.
-2. `locked_blocks_privileged`: when the device is locked (`unlocked = false`), `getKeys`,
-   `pushDescriptor`, `pushOverride`, `pushApprove`, and `pollResult` are unconditionally denied.
-3. `mainnet_blocks_key_injection`: on mainnet (`isMainnet = true`), host key injection (`injectKey`)
-   is unconditionally forbidden — ONLY physical hardware buttons can operate a mainnet signer!
-4. `decode_rejects_short` & `decode_rejects_bad_magic`: malformed/truncated frames fail closed. -/
+2. `locked_blocks_privileged`: when the device is locked, `getKeys`, `pushDescriptor`, `pushOverride` and
+   `pollResult` are denied.
+3. `reviewing_blocks_push`: while a wallet or a payment is on the screen for review, the host can put
+   nothing in its place.
+4. `only_test_builds_inject_keys`: the host can press the buttons only in a regtest build. On signet and
+   mainnet only the physical buttons operate the signer.
+5. `decode_rejects_short` and `decode_rejects_bad_magic`: malformed and truncated frames are refused. -/
 
 namespace Kernel.WireProofs
 
@@ -19,16 +21,22 @@ theorem op_roundtrip (op : Op) : Op.ofByte? op.toByte = some op := by
   cases op <;> rfl
 
 /-- When the signer is locked, every key-export, descriptor, PSBT, and signature-poll op is refused. -/
-theorem locked_blocks_privileged (op : Op) (isMainnet : Bool)
+theorem locked_blocks_privileged (op : Op) (reviewing testBuild : Bool)
     (h : op.requiresUnlocked = true) :
-    op.allowed false isMainnet = false := by
+    op.allowed false reviewing testBuild = false := by
   simp [Op.allowed, h]
 
-/-- On mainnet builds, host key injection (`injectKey`) is unconditionally forbidden. -/
-theorem mainnet_blocks_key_injection (unlocked : Bool) :
-    Op.injectKey.allowed unlocked true = false := by
+/-- While a wallet or a payment is on the screen for review, the host can put nothing in its place. -/
+theorem reviewing_blocks_push (op : Op) (unlocked testBuild : Bool)
+    (h : op.isPush = true) :
+    op.allowed unlocked true testBuild = false := by
+  cases unlocked <;> simp [Op.allowed, h]
+
+/-- Outside a regtest build, host key injection (`injectKey`) is refused, whatever else is true. -/
+theorem only_test_builds_inject_keys (unlocked reviewing : Bool) :
+    Op.injectKey.allowed unlocked reviewing false = false := by
   have heq : (Op.injectKey == Op.injectKey) = true := by decide
-  simp [Op.allowed, Op.requiresUnlocked, heq]
+  simp [Op.allowed, Op.requiresUnlocked, Op.isPush, heq]
 
 /-- Any frame shorter than 12 bytes (8-byte header + 4-byte CRC-32) is rejected. -/
 theorem decode_rejects_short (raw : ByteArray) (h : raw.size < headerSize + trailerSize) :
