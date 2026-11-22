@@ -127,7 +127,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     | .locked => "ACCESS LOCKED"
     | .setupChoice => "INIT KEY"
     | .setupWords _ p => s!"WORDS {p + 1}/2"
-    | .setupRestore entered _ => s!"RESTORE {entered.size}/24"
+    | .setupRestore entered _ => s!"RESTORE WORD {min 24 (entered.size + 1)}"
     | .setupPin _ none _ => "SET PIN"
     | .setupPin _ (some _) _ => "CONFIRM PIN"
     | .home => "HOME"
@@ -156,7 +156,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
       .text (cx + 16) (cy + 86) "SECPCT CONSTANT-TIME CURVE" 2 pal.fg,
       .text (cx + 16) (cy + 114) s!"NETWORK: {m.network.upperName} (AIR-GAPPED)" 2 pal.primary,
       .button .setupGenerate { x := cx, y := cy + 178, w := cw, h := 92 } "GENERATE NEW 24 WORDS" pal.primary pal.pillFg 3 24,
-      .button .setupRestore { x := cx, y := cy + 292, w := cw, h := 92 } "RESTORE FROM 24 WORDS" pal.secondary pal.pillFg 3 24 ]
+      .button .setupRestore { x := cx, y := cy + 292, w := cw, h := 92 } "RESTORE 12 OR 24 WORDS" pal.secondary pal.pillFg 3 24 ]
 
   | .setupWords words page => Id.run do
     let startIdx := if page == 0 then 0 else 12
@@ -193,7 +193,7 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
     let cands := Bip39Ascii.matchingPrefix pref 6
     let mut cmds : List DrawCmd := [
       .pill { x := cx, y := cy, w := cw, h := 58 } pal.surface 12,
-      .text (cx + 12) (cy + 10) s!"WORD {min 24 (entered.size + 1)}/24: {pref.toUpper}_" 3 pal.highlight
+      .text (cx + 12) (cy + 10) s!"WORD {min 24 (entered.size + 1)}: {pref.toUpper}_" 3 pal.highlight
     ]
     -- Matching BIP39 suggestion pills (up to 6, 2 columns × 3 rows)
     let sugY := cy + 70
@@ -227,9 +227,9 @@ def view (m : Model) (w h : Nat := 540) (topInset : Nat := 64) (bottomInset : Na
       .button .restoreBackspace { x := cx, y := actY, w := thirdW, h := 66 } "DEL CHAR" pal.secondary pal.pillFg 2 16,
       .button .restorePopWord { x := cx + thirdW + 8, y := actY, w := thirdW, h := 66 } "UNDO WORD" pal.secondary pal.pillFg 2 16,
       .button .restoreSubmit { x := cx + 2 * (thirdW + 8), y := actY, w := thirdW, h := 66 }
-        (if entered.size == 24 then "VERIFY 24" else s!"{entered.size}/24")
-        (if entered.size == 24 then pal.ok else pal.surface)
-        (if entered.size == 24 then pal.pillFg else Color.dimText) 2 16
+        (if Bip39Ascii.acceptedLength entered.size then s!"VERIFY {entered.size}" else s!"{entered.size} OF 12/24")
+        (if Bip39Ascii.acceptedLength entered.size then pal.ok else pal.surface)
+        (if Bip39Ascii.acceptedLength entered.size then pal.pillFg else Color.dimText) 2 16
     ]
     return cmds
 

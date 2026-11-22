@@ -11,7 +11,7 @@ Format of `vault.bin`:
   - byte  `7`      : KDF work factor exponent `k` (`rounds = 1 <<< k`; default `k = 12` = 4096 PBKDF2-HMAC-SHA512 rounds)
   - bytes `8..24`  : 16-byte random salt
   - bytes `24..36` : 12-byte random AES-GCM nonce
-  - bytes `36..N`  : AES-256-GCM ciphertext of canonical 24-word mnemonic UTF-8
+  - bytes `36..N`  : AES-256-GCM ciphertext of the canonical mnemonic, 12 words or 24, UTF-8
   - bytes `N..N+16`: 16-byte GCM authentication tag (AAD = header bytes `0..24`)
 
 Wrong PIN attempts are counted in `attempts.bin` (1 byte). Reaching `maxFailedAttempts` (10)
@@ -41,7 +41,7 @@ private def deriveKey (pin : String) (salt : ByteArray) (net : Network) (kdfExp 
   let domain := ("tricorder-vault-v1:" ++ net.name ++ ":").toUTF8 ++ salt
   pbkdf2HmacSha512 pin.toUTF8 domain rounds 32
 
-/-- Seals a validated 24-word mnemonic into `vault.bin` bytes using fresh 16-byte `salt` and 12-byte `nonce`. -/
+/-- Seals a validated mnemonic into `vault.bin` bytes using fresh 16-byte `salt` and 12-byte `nonce`. -/
 def sealVault (net : Network) (pin : String) (words : Array String) (salt nonce : ByteArray)
     (kdfExp : UInt8 := defaultKdfExp) : Except String ByteArray := do
   unless validPin pin do throw s!"PIN must be {minPinLength}..{maxPinLength} digits"
@@ -58,7 +58,7 @@ def sealVault (net : Network) (pin : String) (words : Array String) (salt nonce 
     | none => throw "unexpected nonce size"
     | some combined => return header ++ combined
 
-/-- Opens `vault.bin` bytes for `net` with `pin`, returning the validated 24-word mnemonic. -/
+/-- Opens `vault.bin` bytes for `net` with `pin`, returning the validated mnemonic. -/
 def openVault (net : Network) (pin : String) (blob : ByteArray) : Except String (Array String) := do
   unless blob.size ≥ headerSize + AESGCM.nonceSize + AESGCM.tagSize do
     throw "vault file is truncated"

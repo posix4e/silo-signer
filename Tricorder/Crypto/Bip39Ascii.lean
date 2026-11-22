@@ -55,25 +55,34 @@ def fromEntropy (entropy : ByteArray) : Except String (Array String) := do
     words := words.push wordlist[idx]!
   return words
 
-/-- Validates 24 English BIP39 words and recovers the 32-byte entropy. -/
+/-- Whether a phrase of this many words is one this signer takes: 12 words (128 bits of entropy) or 24
+(256 bits). -/
+def acceptedLength (n : Nat) : Bool := n == 12 || n == 24
+
+/-- Validates 12 or 24 English BIP39 words and recovers the entropy: 16 bytes or 32.
+
+Each word is 11 bits. Of a phrase's bits the first 32 in every 33 are entropy, and the rest are the first
+bits of the entropy's SHA-256: 4 of them for 12 words, 8 for 24. -/
 def validate (words : Array String) : Except String ByteArray := do
-  unless words.size == 24 do throw s!"expected 24 words, got {words.size}"
-  let mut bits := Array.emptyWithCapacity 264
+  unless acceptedLength words.size do throw s!"expected 12 or 24 words, got {words.size}"
+  let entropyBytes := words.size * 4 / 3
+  let checksumBits := words.size / 3
+  let mut bits := Array.emptyWithCapacity (words.size * 11)
   for w in words do
     match indexOf? w with
     | none => throw s!"word not in BIP39 list: {w}"
     | some idx =>
       for j in [0:11] do
         bits := bits.push ((idx >>> (10 - j)) % 2 == 1)
-  let mut entropy := ByteArray.mk (Array.replicate 32 0)
-  for i in [0:256] do
+  let mut entropy := ByteArray.mk (Array.replicate entropyBytes 0)
+  for i in [0:entropyBytes * 8] do
     if bits[i]! then
       let b := entropy[i / 8]! ||| (1 <<< (7 - (i % 8)).toUInt8)
       entropy := entropy.set! (i / 8) b
   let mut cs := 0
-  for j in [0:8] do
-    cs := cs * 2 + (if bits[256 + j]! then 1 else 0)
-  let expected := (sha256 entropy)[0]!.toNat
+  for j in [0:checksumBits] do
+    cs := cs * 2 + (if bits[entropyBytes * 8 + j]! then 1 else 0)
+  let expected := (sha256 entropy)[0]!.toNat >>> (8 - checksumBits)
   unless cs == expected do throw "BIP39 checksum mismatch"
   return entropy
 
@@ -85,7 +94,7 @@ def splitSentence (text : String) : Array String :=
 def joinWords (words : Array String) : String :=
   " ".intercalate words.toList
 
-/-- 24-word English BIP39 mnemonic -> 64-byte BIP39 seed via PBKDF2-HMAC-SHA512 (2048 rounds). -/
+/-- English BIP39 mnemonic, of 12 words or 24 -> 64-byte BIP39 seed via PBKDF2-HMAC-SHA512 (2048 rounds). -/
 def toSeed (words : Array String) (passphrase : String := "") : ByteArray :=
   let sentence := (joinWords words).toLower
   pbkdf2HmacSha512 sentence.toUTF8 ("mnemonic" ++ passphrase).toUTF8 2048 64

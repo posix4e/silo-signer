@@ -133,7 +133,7 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
   | .setupChoice, .setupGenerate =>
     ({ m with secrets := none, statusMsg := "DRAWING ENTROPY...", isError := false }, [.generateSeed])
   | .setupChoice, .setupRestore =>
-    ({ m with screen := .setupRestore #[] "", secrets := none, statusMsg := "ENTER 24 BIP39 WORDS", isError := false }, [])
+    ({ m with screen := .setupRestore #[] "", secrets := none, statusMsg := "ENTER 12 OR 24 BIP39 WORDS", isError := false }, [])
 
   -- Displaying generated 24 words (pages 0 and 1, 12 words per page)
   | .setupWords words page, .setupNextPage =>
@@ -146,7 +146,7 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
   | .setupWords words _, .setupToPin =>
     ({ m with screen := .setupPin words none "", secrets := none, statusMsg := "CHOOSE 6-12 DIGIT PIN", isError := false }, [])
 
-  -- On-screen 24-word BIP39 restore
+  -- On-screen BIP39 restore, of 12 words or 24
   | .setupRestore entered pref, .restoreLetter c =>
     if entered.size < 24 && pref.length < 8 then
       ({ m with screen := .setupRestore entered (pref.push c), secrets := none, isError := false }, [])
@@ -158,12 +158,12 @@ def updateTap (m : Model) (btn : ButtonId) : Model × List Effect :=
   | .setupRestore entered _, .restorePickWord w =>
     if entered.size < 24 then
       let next := entered.push w
-      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size}/24 WORDS ENTERED", isError := false }, [])
+      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size} WORDS ENTERED", isError := false }, [])
     else (m, [])
   | .setupRestore entered _, .restorePopWord =>
     if entered.size > 0 then
       let next := entered.pop
-      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size}/24 WORDS ENTERED", isError := false }, [])
+      ({ m with screen := .setupRestore next "", secrets := none, statusMsg := s!"{next.size} WORDS ENTERED", isError := false }, [])
     else
       ({ m with screen := .setupChoice, secrets := none, statusMsg := "INITIALIZE KEY", isError := false }, [])
   | .setupRestore entered _, .restoreSubmit =>
