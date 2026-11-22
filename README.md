@@ -115,3 +115,7 @@ clang -O2 -Wall -Wextra -framework IOKit -framework CoreFoundation \
 > Note: `build/tricorder-usb key <prev|next|select|back>` is strictly a non-mainnet test helper; `Kernel.WireProofs.mainnet_blocks_key_injection` formally proves `OP_INJECT_KEY` is unconditionally rejected on `mainnet` builds.
 
 See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the exact formal verification boundary and trusted computing base (TCB).
+
+## License
+
+Licensed under the GNU Affero General Public License, version 3 ([LICENSE](LICENSE)).
