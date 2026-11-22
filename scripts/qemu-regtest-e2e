@@ -171,7 +171,23 @@ class QemuTricorder:
         return txt
 
     def key(self, k: int) -> str:
-        return self.rpc_ok(OP_INJECT_KEY, bytes([k]))
+        # A press on a dark panel lights it and presses nothing: the reply says "woke", and the press is made again.
+        reply = self.rpc_ok(OP_INJECT_KEY, bytes([k]))
+        if reply.startswith("woke|"):
+            reply = self.rpc_ok(OP_INJECT_KEY, bytes([k]))
+            assert not reply.startswith("woke|"), f"panel dark again at once: {reply}"
+        return reply
+
+    def panel_is_black(self, ppm_path: str) -> bool:
+        if os.path.exists(ppm_path):
+            os.unlink(ppm_path)
+        self.screendump(ppm_path)
+        time.sleep(0.2)
+        with open(ppm_path, "rb") as f:
+            data = f.read()
+        # P6, width height, maxval, then the pixels.
+        parts = data.split(b"\n", 3)
+        return len(parts) == 4 and not any(parts[3])
 
     def move_and_select(self, target_idx: int):
         st = self.rpc_ok(OP_GET_STATUS).split("|")
@@ -248,6 +264,23 @@ def main():
         print("ok    Captured live QEMU ramfb LCARS Keys + QR screenshot")
 
         keys_before_reboot = qemu.rpc_ok(OP_GET_KEYS)
+
+        # ---- 2b. Left alone, the panel goes dark; a press lights it and presses nothing ----
+        dark_ppm = os.path.join(SHOTS_DIR, "02b_qemu_dark.ppm")
+        assert not qemu.panel_is_black(dark_ppm), "panel black while in use"
+        before = qemu.rpc_ok(OP_GET_STATUS)
+        deadline = time.time() + 90.0
+        while not qemu.panel_is_black(dark_ppm):
+            assert time.time() < deadline, "panel never went dark"
+            time.sleep(2.0)
+        # Asking for the status changes nothing on the screen, and does not light it.
+        assert qemu.rpc_ok(OP_GET_STATUS) == before, "status changed while dark"
+        assert qemu.panel_is_black(dark_ppm), "a status request lit the panel"
+        woke = qemu.rpc_ok(OP_INJECT_KEY, bytes([KEY_SELECT]))
+        assert woke.startswith("woke|"), f"press on a dark panel was not swallowed: {woke}"
+        assert qemu.rpc_ok(OP_GET_STATUS) == before, "the press that lit the panel pressed something"
+        assert not qemu.panel_is_black(dark_ppm), "panel still black after a press"
+        print("ok    Left alone the panel went dark; a press lit it and pressed nothing")
 
         # ---- 3. HARD POWER-OFF & COLD REBOOT QEMU (Zero-FS 2-slot VaultStore persistence test!) ----
         qemu.stop()

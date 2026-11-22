@@ -222,6 +222,25 @@ lean_obj_res silo_hw_pause(void) {
     return lean_box(0);
 }
 
+/* Sleeps until the next event of the timer's event stream: `wfe`, which stops the core's clock until an
+ * event arrives. The event stream is the architecture's own (CNTKCTL_EL1: EVNTEN, bit 2; EVNTDIR, bit 3;
+ * EVNTI, bits 7:4) and needs no interrupt controller: with EVNTI = 15 an event comes on each rise of bit 15
+ * of the virtual counter, every 65,536 ticks, about 2.7 ms at the Pixel's 24.576 MHz. It is switched on the
+ * first time this is called, and nothing else in this image uses `wfe`. */
+lean_obj_res silo_hw_idle_wait(void) {
+    static int stream_on;
+    if (!stream_on) {
+        uint64_t ctl;
+        __asm__ volatile("mrs %0, CNTKCTL_EL1" : "=r"(ctl));
+        ctl &= ~0xF8ULL;                 /* EVNTI and EVNTDIR cleared: a rising bit */
+        ctl |= (15ULL << 4) | (1ULL << 2);
+        __asm__ volatile("msr CNTKCTL_EL1, %0\n isb" :: "r"(ctl));
+        stream_on = 1;
+    }
+    __asm__ volatile("wfe");
+    return lean_box(0);
+}
+
 uint64_t silo_hw_ticks(void) {
     return boot_cntvct();
 }

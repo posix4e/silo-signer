@@ -137,6 +137,11 @@ opaque consoleWrite (bytes : @& ByteArray) : BaseIO Unit
 @[extern "silo_hw_pause"]
 opaque pause : BaseIO Unit
 
+/-- Sleeps the core until the next event of the timer's event stream (`wfe`): about 2.7 ms at most on the
+Pixel. It needs no interrupt. On a machine where no event comes it does not return. -/
+@[extern "silo_hw_idle_wait"]
+opaque idleWait : BaseIO Unit
+
 /-- Monotonic counter tick (`CNTVCT_EL0` on AArch64). -/
 @[extern "silo_hw_ticks"]
 opaque ticks : BaseIO UInt64

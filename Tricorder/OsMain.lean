@@ -13,6 +13,8 @@ import Kernel.Qemu.VirtioMmio
 import Kernel.Komodo
 import Kernel.Dwc3
 import Kernel.KomodoTouch
+import Kernel.Idle
+import Kernel.Panel
 import Tricorder.BuildConfig
 import Tricorder.Network
 import Tricorder.Crypto.Bip39Ascii
@@ -61,6 +63,7 @@ structure BareState where
   keys : GpioKeys.KeysState := {}
   lastSigned? : Option SignedResult := none
   dirty : Bool := true
+  idle : Idle.State := {}
 
 private def hasWindow (wins : Array Hw.Window) (addr len : UInt64) : Bool :=
   wins.any fun w => addr ≥ w.base && w.size ≥ len && addr - w.base ≤ w.size - len
@@ -76,8 +79,13 @@ private def isReviewing (m : Model) : Bool :=
   | .reviewTx .. | .reviewDescriptor .. => true
   | _ => false
 
-/-- An unlocked signer left alone locks itself: about five minutes on the Pixel's 24.576 MHz counter. -/
-private def idleLockTicks : UInt64 := 7500000000
+/-- An unlocked signer left alone locks itself after about five minutes, and the panel of one left alone,
+locked or not, goes dark after one. Both are counted on the Pixel's 24.576 MHz counter. -/
+private def idleConfig : Idle.Config := { screenOffTicks := 1474560000, lockTicks := 7500000000 }
+
+/-- Whether the panel is dark (`Kernel.Idle`). -/
+private def BareState.dark (st : BareState) : Bool :=
+  st.idle.phase == .off
 
 /-- Health-checked hardware entropy: prefers AArch64 `RNDRRS`/`RNDR`, mixes/falls back to `virtio-rng`. -/
 private def hardwareRandom (st : BareState) (count : Nat) : BaseIO (Except String (BareState × ByteArray)) := do
@@ -445,14 +453,50 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
   | _ =>
     return (st, { op := .respErr, payload := "UNSUPPORTED_OP".toUTF8 })
 
+/-- Draws the screen if it has changed. A dark panel is left dark: what changed is drawn when it is lit. -/
 private def renderIfDirty (st : BareState) : BaseIO BareState := do
-  if !st.dirty then return st
+  if !st.dirty || st.dark then return st
   let pal := st.model.network.palette
   let frame := renderCmds 540 1200 pal.bg st.cmds
   Fb.blitToHardware frame.pixels 540 1200 .bgra8888
   if let some decon := st.deconFlushBase? then
     Komodo.deconFlushFrame decon
   return { st with dirty := false }
+
+/-- Tells `Kernel.Idle` what just happened and does what it decides: locks, makes the panel dark, or lights
+it. Returns whether a press or tap is to be passed on to the screens; one that lit a dark panel is not. -/
+private def noteInput (st : BareState) (i : Idle.Input) : BaseIO (BareState × Bool) := do
+  let now ← Hw.ticks
+  let d := Idle.step idleConfig st.idle st.model.secrets.isSome now.toNat i
+  let mut st := { st with idle := d.state }
+  if d.lock then
+    -- Left alone while unlocked, the signer locks: its secrets are wiped as `appPaused` wipes them.
+    st ← dispatch st .appPaused
+    -- Locking in the dark does not light the panel; the lock screen is drawn when something does.
+    if st.dark then st := { st with dirty := false }
+  if d.blank then
+    Panel.dark st.deconFlushBase?
+  if d.wake then
+    st := { st with dirty := true }
+  st ← renderIfDirty st
+  return (st, d.deliver)
+
+/-- A change to the picture that came from the cable lights a dark panel, so that nothing new is shown where
+it cannot be seen. A frame that changed nothing does not. -/
+private def showIfChanged (st : BareState) : BaseIO BareState := do
+  if st.dirty then return (← noteInput st .stir).1 else return st
+
+/-- Handles a frame from the cable. A button press from the host (regtest builds only) is a press like any
+other: on a dark panel it lights the panel and presses nothing, and the reply says so. -/
+private def handleFrame (st : BareState) (frame : Wire.Frame) : BaseIO (BareState × Wire.Frame) := do
+  if frame.op == .injectKey && frame.op.allowed st.model.secrets.isSome (isReviewing st.model) (isTestBuild st.model) then
+    let (st, deliver) ← noteInput st .key
+    if !deliver then
+      return (st, { op := .respOk, payload := s!"woke|{st.focusIdx}|{st.model.statusMsg}".toUTF8 })
+    let (st, reply) ← handleWireFrame st frame
+    return (← renderIfDirty st, reply)
+  let (st, reply) ← handleWireFrame st frame
+  return (← showIfChanged st, reply)
 
 @[export tricorder_bare_main]
 def bareMain : IO UInt32 := do
@@ -565,8 +609,8 @@ def bareMain : IO UInt32 := do
   let hbRowAmber   := mkHbRow 0x00 0xAA 0xFF
   let hbRowMagenta := mkHbRow 0xFF 0x00 0xFF
   let hbRowYellow  := mkHbRow 0x00 0xFF 0xFF
-  let paintDot (row : ByteArray) : BaseIO Unit := do
-    if hbActive then
+  let paintDot (lit : Bool) (row : ByteArray) : BaseIO Unit := do
+    if hbActive && lit then
       let stride := fiLive.stride.toUInt64
       for dy in [0:16] do
         let off := ((260 + dy).toUInt64 * stride + 1260) * 4
@@ -581,7 +625,9 @@ def bareMain : IO UInt32 := do
   let mut lastShownEv : Nat := 0
   let mut shownClkGated : Bool := false
   let mut powerHoldTicks : Nat := 0
-  let mut lastActivity ← Hw.ticks
+  let mut swallowTap : Bool := false
+  let bootTicks := (← Hw.ticks).toNat
+  st := { st with idle := { phase := .on, lastPerson := bootTicks, lastScreen := bootTicks } }
   while running do
     -- Poll serial / Wire transport on PL011 (QEMU) when announced
     let uartRes ← if st.hasPl011 then st.uart.pollInputOrWire else pure none
@@ -595,15 +641,16 @@ def bareMain : IO UInt32 := do
         | 0x1b | 0x71 => some .back   -- Esc / 'q'
         | _ => none
       if let some k := key? then
-        lastActivity ← Hw.ticks
-        st ← handleKey st k
-        st ← renderIfDirty st
+        let (st', deliver) ← noteInput st .key
+        st := st'
+        if deliver then
+          st ← handleKey st k
+          st ← renderIfDirty st
     | some (.inr (.error err)) =>
       st.uart.sendFrame { op := .respErr, payload := err.toUTF8 }
     | some (.inr (.ok frame)) =>
-      if frame.op == .injectKey then lastActivity ← Hw.ticks
-      let (st', reply) ← handleWireFrame st frame
-      st ← renderIfDirty st'
+      let (st', reply) ← handleFrame st frame
+      st := st'
       st.uart.sendFrame reply
     | none =>
       -- Poll USB-C DWC3 Bulk-OUT `Kernel.Wire` transport on Pixel `komodo`
@@ -615,11 +662,11 @@ def bareMain : IO UInt32 := do
         if usb'.clkGated && !shownClkGated then
           shownClkGated := true
           st := rebuildView { st with model := { st.model with statusMsg := "USB CLK GATED (BUTTONS OK)" } } false
-          st ← renderIfDirty st
+          st ← showIfChanged st
         else if !wasCfg && usb'.configured then
           lastShownEv := usb'.evSeen
           st := rebuildView { st with model := { st.model with statusMsg := s!"USB-C READY (1209:4701) EV={usb'.evSeen}" } } false
-          st ← renderIfDirty st
+          st ← showIfChanged st
         else if !usb'.configured && usb'.evSeen != lastShownEv then
           let now ← Hw.ticks
           if lastUsbUiTick == 0 then
@@ -628,15 +675,14 @@ def bareMain : IO UInt32 := do
             lastShownEv := usb'.evSeen
             lastUsbUiTick := 0
             st := rebuildView { st with model := { st.model with statusMsg := s!"USB EV={usb'.evSeen} R={usb'.lastSetupReq} V={usb'.lastSetupVal}" } } false
-            st ← renderIfDirty st
+            st ← showIfChanged st
         match frame? with
         | some (.error err) =>
           let usb'' ← usb'.sendFrame { op := .respErr, payload := err.toUTF8 }
           st := { st with dwc3? := some usb'' }
         | some (.ok frame) =>
-          if frame.op == .injectKey then lastActivity ← Hw.ticks
-          let (st', reply) ← handleWireFrame st frame
-          st ← renderIfDirty st'
+          let (st', reply) ← handleFrame st frame
+          st := st'
           if let some u := st.dwc3? then
             let u' ← u.sendFrame reply
             st := { st with dwc3? := some u' }
@@ -662,34 +708,47 @@ def bareMain : IO UInt32 := do
           let (keys', ev?) := st.keys.poll { volUp := u, volDown := d, power := p }
           st := { st with keys := keys' }
           if let some k := ev? then
-            lastActivity := now
-            paintDot hbRowMagenta
-            st ← handleKey st k
-            paintDot hbRowYellow
-            st ← renderIfDirty st
-            paintDot hbRowGreen
+            -- A press on a dark panel lights it and goes no further.
+            let (st', deliver) ← noteInput st .key
+            st := st'
+            if deliver then
+              paintDot true hbRowMagenta
+              st ← handleKey st k
+              paintDot true hbRowYellow
+              st ← renderIfDirty st
+              paintDot true hbRowGreen
         -- Live 2 Hz proof-of-life heartbeat LED in top-right OLED margin (`x=1260, y=260`)
         if hbActive && now - lastHbTick ≥ 12500000 then
           lastHbTick := now
           hbPhase := !hbPhase
           let row := if shownClkGated then hbRowAmber else if hbPhase then hbRowGreen else hbRowCyan
-          paintDot row
+          paintDot (!st.dark) row
       -- The touchscreen: at most one message a turn of the loop, and at most one tap from it.
       if let some t := st.touch? then
-        let (t', tap?) ← t.poll 540 1200
-        st := { st with touch? := some t' }
-        if let some (x, y) := tap? then
-          lastActivity ← Hw.ticks
-          st ← handleTap st x y
-          st ← renderIfDirty st
-      -- Left alone while unlocked, the signer locks: its secrets are wiped as `appPaused` wipes them.
-      if st.model.secrets.isSome then
-        let idleNow ← Hw.ticks
-        if idleNow - lastActivity ≥ idleLockTicks then
-          lastActivity := idleNow
-          st ← dispatch st .appPaused
-          st ← renderIfDirty st
-      Hw.pause
+        if st.dark then
+          -- Dark, the controller is not read: only its interrupt line is looked at. When it has something
+          -- to say the panel is lit, and the touch that lit it taps nothing.
+          if ← KomodoTouch.waiting then
+            st := (← noteInput st .stir).1
+            swallowTap := true
+        else
+          let (t', tap?) ← t.poll 540 1200
+          st := { st with touch? := some t' }
+          if let some (x, y) := tap? then
+            let (st', deliver) ← noteInput st .tap
+            st := st'
+            if swallowTap then
+              swallowTap := false
+            else if deliver then
+              st ← handleTap st x y
+              st ← renderIfDirty st
+          else if swallowTap && t'.tap.start?.isNone && !(← KomodoTouch.waiting) then
+            swallowTap := false
+      -- The clocks: the lock, and the panel going dark.
+      st := (← noteInput st .none).1
+      -- Dark, a regtest image sleeps between looks at the buttons, the glass and the cable. Signet and
+      -- mainnet images spin as they always have, until the sleep has been seen to end on a phone.
+      if st.dark && isTestBuild st.model then Hw.idleWait else Hw.pause
   return 0
 
 def main : IO UInt32 := bareMain

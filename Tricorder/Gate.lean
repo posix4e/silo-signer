@@ -9,6 +9,7 @@ import Kernel.WireProofs
 import Kernel.FbProofs
 import Kernel.GpioKeysProofs
 import Kernel.TouchProofs
+import Kernel.IdleProofs
 import Kernel.Dwc3Proofs
 import Tricorder.Proofs.LayoutProofs
 import Tricorder.Proofs.StateProofs
@@ -109,6 +110,16 @@ elab "#gate_axioms " id:ident : command => do
 #gate_axioms Kernel.TouchProofs.moved_stays_moved
 #gate_axioms Kernel.GpioKeysProofs.release_resets_latch
 #gate_axioms Kernel.GpioKeysProofs.single_glitch_keys_none
+
+-- Going dark when left alone: a dark panel passes nothing on, and changes nothing about locking
+#gate_axioms Kernel.IdleProofs.off_never_delivers
+#gate_axioms Kernel.IdleProofs.lock_is_the_lock_clock
+#gate_axioms Kernel.IdleProofs.only_a_person_sets_the_lock_clock
+#gate_axioms Kernel.IdleProofs.wake_after_lock_time_locks
+#gate_axioms Kernel.IdleProofs.input_when_off_wakes
+#gate_axioms Kernel.IdleProofs.quiet_when_off_stays_off
+#gate_axioms Kernel.IdleProofs.blank_only_from_quiet
+#gate_axioms Kernel.IdleProofs.on_delivers
 
 -- Bare-Metal USB-C Synopsys DWC3 Descriptor & SETUP Bounds
 #gate_axioms Kernel.Dwc3Proofs.deviceDescriptor_size
