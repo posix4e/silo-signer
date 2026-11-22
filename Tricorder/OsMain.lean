@@ -64,6 +64,8 @@ structure BareState where
   lastSigned? : Option SignedResult := none
   dirty : Bool := true
   idle : Idle.State := {}
+  /-- How many presses, taps and other stirrings `Kernel.Idle` has been told of, for the bench. -/
+  idleSeen : Nat × Nat × Nat := (0, 0, 0)
 
 private def hasWindow (wins : Array Hw.Window) (addr len : UInt64) : Bool :=
   wins.any fun w => addr ≥ w.base && w.size ≥ len && addr - w.base ≤ w.size - len
@@ -406,6 +408,9 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
     --   'd' micros:u32      wait
     --   'f' off:u32 n:u16   n bytes of the device tree the bootloader handed over (its size, if n = 0)
     --   'W'                 the register windows this image may touch: base:u64 size:u64 each
+    --   'i'                 going dark, without disturbing it: whether the panel is dark (u32), ticks since a
+    --                       person's last press or tap and since the panel last had a reason to be lit
+    --                       (u64 each), and how many presses, taps and other stirrings there have been (u32 each)
     -- A register outside every window ends the run: the reply is what was read so far, as an error.
     let wins ← Hw.windows
     let p := f.payload
@@ -445,6 +450,13 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
         for w in wins do
           out := push64 (push64 out w.base) w.size
         i := i + 1
+      else if tag == 0x69 then                        -- 'i'
+        let now := (← Hw.ticks).toNat
+        let (keys, taps, stirs) := st.idleSeen
+        out := push32 out (if st.idle.phase == .off then 1 else 0)
+        out := push64 (push64 out (now - st.idle.lastPerson).toUInt64) (now - st.idle.lastScreen).toUInt64
+        out := push32 (push32 (push32 out keys.toUInt32) taps.toUInt32) stirs.toUInt32
+        i := i + 1
       else
         bad := some "BAD_LAB_STEP"
     match bad with
@@ -468,7 +480,13 @@ it. Returns whether a press or tap is to be passed on to the screens; one that l
 private def noteInput (st : BareState) (i : Idle.Input) : BaseIO (BareState × Bool) := do
   let now ← Hw.ticks
   let d := Idle.step idleConfig st.idle st.model.secrets.isSome now.toNat i
-  let mut st := { st with idle := d.state }
+  let (keys, taps, stirs) := st.idleSeen
+  let seen := match i with
+    | .key => (keys + 1, taps, stirs)
+    | .tap => (keys, taps + 1, stirs)
+    | .stir => (keys, taps, stirs + 1)
+    | .none => (keys, taps, stirs)
+  let mut st := { st with idle := d.state, idleSeen := seen }
   if d.lock then
     -- Left alone while unlocked, the signer locks: its secrets are wiped as `appPaused` wipes them.
     st ← dispatch st .appPaused
