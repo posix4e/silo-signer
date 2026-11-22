@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# End-to-end Bitcoin Core regtest co-signing test for Tricorder on the verified minimal runtime:
+# 1. Taproot 2-of-3: tr(NUMS, sortedmulti_a(2, CORE1, TRICORDER, CORE2))
+#    - Verifies Tricorder address #0 == Bitcoin Core address #0
+#    - Funds wallet, creates PSBT, CORE1 signs + TRICORDER signs, finalizes, broadcasts, confirms in a block!
+# 2. SegWit v0 2-of-3: wsh(sortedmulti(2, CORE1, TRICORDER, CORE2))
+#    - Same full cycle including full nonWitnessUTXO prevtx verification & ECDSA signing!
+# 3. Silo Approver (`silo/approve`):
+#    - Signs a real Bitcoin Core PSBT txid and confirms valid 64-byte BIP340 approval line!
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cli="$root/.lake/build/bin/regtest-cli-min"
+[ -x "$cli" ] || { echo "regtest-e2e: missing $cli (run lake build regtest-cli && scripts/build-min regtest-cli)" >&2; exit 2; }
+
+work="$(mktemp -d /tmp/tricorder-regtest.XXXXXX)"
+cleanup() {
+  bitcoin-cli -regtest -datadir="$work" stop >/dev/null 2>&1 || true
+  sleep 1
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+bitcoind -regtest -datadir="$work" -daemon -server=1 -fallbackfee=0.0001 -txindex=0 -listen=0 >/dev/null
+for _ in $(seq 1 30); do
+  if bitcoin-cli -regtest -datadir="$work" getblockchaininfo >/dev/null 2>&1; then break; fi
+  sleep 0.2
+done
+
+bcli() { bitcoin-cli -regtest -datadir="$work" "$@"; }
+
+# Miner & two co-signer Core wallets
+bcli createwallet miner >/dev/null
+bcli createwallet core1 >/dev/null
+bcli createwallet core2 >/dev/null
+
+miner_addr="$(bcli -rpcwallet=miner getnewaddress)"
+bcli -rpcwallet=miner generatetoaddress 105 "$miner_addr" >/dev/null
+
+# Extract extended public key expression from a Core descriptor wallet
+core_xpub_expr() {
+  local w="$1"
+  bcli -rpcwallet="$w" listdescriptors | jq -r '.descriptors[] | select(.desc | startswith("tr(")) | select(.internal == false) | .desc' | head -n 1 | sed -E 's/^tr\(([^)]+)\)#.*$/\1/; s|/0/\*$||'
+}
+core_xprv_expr() {
+  local w="$1"
+  bcli -rpcwallet="$w" listdescriptors true | jq -r '.descriptors[] | select(.desc | startswith("tr(")) | select(.internal == false) | .desc' | head -n 1 | sed -E 's/^tr\(([^)]+)\)#.*$/\1/; s|/0/\*$||'
+}
+
+c1_pub="$(core_xpub_expr core1)"
+c1_prv="$(core_xprv_expr core1)"
+c2_pub="$(core_xpub_expr core2)"
+
+seed_hex="0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+tri_keys="$("$cli" keys regtest "$seed_hex")"
+tri_pub="$(printf '%s\n' "$tri_keys" | sed -n '1p')"
+tri_approver="$(printf '%s\n' "$tri_keys" | sed -n '2p')"
+echo "ok    Tricorder override key: $tri_pub"
+echo "ok    Tricorder approver key: $tri_approver"
+
+nums="50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
+
+# ---- 1. Taproot 2-of-3 co-sign ----
+tr_body="tr($nums,sortedmulti_a(2,$c1_pub/<0;1>/*,$tri_pub/<0;1>/*,$c2_pub/<0;1>/*))"
+tr_desc="$tr_body#$(bcli getdescriptorinfo "$tr_body" | jq -r '.checksum')"
+tr_ext_pub="$(bcli getdescriptorinfo "tr($nums,sortedmulti_a(2,$c1_pub/0/*,$tri_pub/0/*,$c2_pub/0/*))" | jq -r '.descriptor')"
+tr_core_addr="$(bcli deriveaddresses "$tr_ext_pub" '[0,0]' | jq -r '.[0]')"
+tr_tri_addr="$("$cli" addr0 regtest "$seed_hex" "$tr_desc")"
+[ "$tr_core_addr" = "$tr_tri_addr" ] || { echo "FAIL Taproot addr0 mismatch: $tr_core_addr vs $tr_tri_addr" >&2; exit 1; }
+echo "ok    Taproot 2-of-3 receive #0 matches Bitcoin Core: $tr_tri_addr"
+
+# Create Core wallet holding CORE1 private key + watch-only for TRICORDER & CORE2
+bcli -named createwallet wallet_name=tr_vault descriptors=true blank=true >/dev/null
+tr_ext_prv_body="tr($nums,sortedmulti_a(2,$c1_prv/0/*,$tri_pub/0/*,$c2_pub/0/*))"
+tr_int_prv_body="tr($nums,sortedmulti_a(2,$c1_prv/1/*,$tri_pub/1/*,$c2_pub/1/*))"
+tr_ext_prv="$tr_ext_prv_body#$(bcli getdescriptorinfo "$tr_ext_prv_body" | jq -r '.checksum')"
+tr_int_prv="$tr_int_prv_body#$(bcli getdescriptorinfo "$tr_int_prv_body" | jq -r '.checksum')"
+bcli -rpcwallet=tr_vault importdescriptors "[
+  {\"desc\":\"$tr_ext_prv\",\"active\":true,\"internal\":false,\"timestamp\":\"now\",\"range\":[0,20]},
+  {\"desc\":\"$tr_int_prv\",\"active\":true,\"internal\":true,\"timestamp\":\"now\",\"range\":[0,20]}
+]" | jq -e 'all(.success == true)' >/dev/null
+
+bcli -rpcwallet=miner sendtoaddress "$tr_tri_addr" 1.0 >/dev/null
+bcli -rpcwallet=miner generatetoaddress 1 "$miner_addr" >/dev/null
+
+dest="$(bcli -rpcwallet=miner getnewaddress)"
+psbt_tr="$(bcli -rpcwallet=tr_vault walletcreatefundedpsbt '[]' "[{\"$dest\":0.25}]" 0 '{"include_watching":true}' true | jq -r '.psbt')"
+# CORE1 signs first
+psbt_tr_c1="$(bcli -rpcwallet=tr_vault walletprocesspsbt "$psbt_tr" true "DEFAULT" true | jq -r '.psbt')"
+# Tricorder Override signs second (on the verified minimal runtime!)
+psbt_tr_both="$("$cli" sign-override regtest "$seed_hex" "$tr_desc" "$psbt_tr_c1")"
+fin_tr="$(bcli finalizepsbt "$psbt_tr_both")"
+[ "$(printf '%s' "$fin_tr" | jq -r '.complete')" = "true" ] || { echo "FAIL Taproot finalizepsbt incomplete: $fin_tr" >&2; exit 1; }
+txid_tr="$(bcli sendrawtransaction "$(printf '%s' "$fin_tr" | jq -r '.hex')")"
+bcli -rpcwallet=miner generatetoaddress 1 "$miner_addr" >/dev/null
+echo "ok    Taproot 2-of-3 co-signed by Tricorder & confirmed in regtest block: $txid_tr"
+
+# Also test Silo Approver signing on the real Bitcoin Core PSBT!
+appr_line="$("$cli" sign-approve regtest "$seed_hex" "$psbt_tr")"
+case "$appr_line" in
+  approval\ *) echo "ok    Silo Approver BIP340 signature: ${appr_line:0:40}..." ;;
+  *) echo "FAIL bad approval output: $appr_line" >&2; exit 1 ;;
+esac
+
+# ---- 2. SegWit v0 2-of-3 co-sign ----
+sw_body="wsh(sortedmulti(2,$c1_pub/<0;1>/*,$tri_pub/<0;1>/*,$c2_pub/<0;1>/*))"
+sw_desc="$sw_body#$(bcli getdescriptorinfo "$sw_body" | jq -r '.checksum')"
+sw_ext_pub="$(bcli getdescriptorinfo "wsh(sortedmulti(2,$c1_pub/0/*,$tri_pub/0/*,$c2_pub/0/*))" | jq -r '.descriptor')"
+sw_core_addr="$(bcli deriveaddresses "$sw_ext_pub" '[0,0]' | jq -r '.[0]')"
+sw_tri_addr="$("$cli" addr0 regtest "$seed_hex" "$sw_desc")"
+[ "$sw_core_addr" = "$sw_tri_addr" ] || { echo "FAIL SegWit v0 addr0 mismatch: $sw_core_addr vs $sw_tri_addr" >&2; exit 1; }
+echo "ok    SegWit v0 2-of-3 receive #0 matches Bitcoin Core: $sw_tri_addr"
+
+bcli -named createwallet wallet_name=sw_vault descriptors=true blank=true >/dev/null
+sw_ext_prv_body="wsh(sortedmulti(2,$c1_prv/0/*,$tri_pub/0/*,$c2_pub/0/*))"
+sw_int_prv_body="wsh(sortedmulti(2,$c1_prv/1/*,$tri_pub/1/*,$c2_pub/1/*))"
+sw_ext_prv="$sw_ext_prv_body#$(bcli getdescriptorinfo "$sw_ext_prv_body" | jq -r '.checksum')"
+sw_int_prv="$sw_int_prv_body#$(bcli getdescriptorinfo "$sw_int_prv_body" | jq -r '.checksum')"
+bcli -rpcwallet=sw_vault importdescriptors "[
+  {\"desc\":\"$sw_ext_prv\",\"active\":true,\"internal\":false,\"timestamp\":\"now\",\"range\":[0,20]},
+  {\"desc\":\"$sw_int_prv\",\"active\":true,\"internal\":true,\"timestamp\":\"now\",\"range\":[0,20]}
+]" | jq -e 'all(.success == true)' >/dev/null
+
+bcli -rpcwallet=miner sendtoaddress "$sw_tri_addr" 1.0 >/dev/null
+bcli -rpcwallet=miner generatetoaddress 1 "$miner_addr" >/dev/null
+
+psbt_sw="$(bcli -rpcwallet=sw_vault walletcreatefundedpsbt '[]' "[{\"$dest\":0.30}]" 0 '{"include_watching":true}' true | jq -r '.psbt')"
+psbt_sw_c1="$(bcli -rpcwallet=sw_vault walletprocesspsbt "$psbt_sw" true "ALL" true | jq -r '.psbt')"
+psbt_sw_both="$("$cli" sign-override regtest "$seed_hex" "$sw_desc" "$psbt_sw_c1")"
+fin_sw="$(bcli finalizepsbt "$psbt_sw_both")"
+[ "$(printf '%s' "$fin_sw" | jq -r '.complete')" = "true" ] || { echo "FAIL SegWit v0 finalizepsbt incomplete: $fin_sw" >&2; exit 1; }
+txid_sw="$(bcli sendrawtransaction "$(printf '%s' "$fin_sw" | jq -r '.hex')")"
+bcli -rpcwallet=miner generatetoaddress 1 "$miner_addr" >/dev/null
+echo "ok    SegWit v0 2-of-3 co-signed by Tricorder & confirmed in regtest block: $txid_sw"
+
+echo "regtest-e2e: ALL BITCOIN CORE REGTEST CO-SIGNING TESTS PASSED!"

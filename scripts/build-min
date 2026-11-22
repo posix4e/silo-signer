@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Links a built Lean executable against the minimal runtime instead of Lean's own.
+#
+#   scripts/build-min <executable> [extra C compiler flags...]
+#
+# Takes the objects Lake compiled for .lake/build/bin/<executable> (the same compiled Lean, byte for byte),
+# drops every library except compiled Lean (Init and Std), and adds rt/*.c. The result is
+# .lake/build/bin/<executable>-min: an ordinary process on the hosted platform.
+#
+# Extra flags go to the compiler for rt/*.c and to the link, e.g. -fsanitize=address,undefined.
+set -euo pipefail
+
+# The OS's own files (boot/, rt/, the other scripts) are found beside this script, so a project that has
+# silo-os as a dependency runs it from its own directory: .lake/packages/silo-os/scripts/build-min ...
+os="$(cd "$(dirname "$0")/.." && pwd)"
+
+exe="${1:?usage: scripts/build-min <executable> [extra C compiler flags...]}"
+shift
+extra=("$@")
+rsp=".lake/build/bin/$exe.rsp"
+[ -f "$rsp" ] || { echo "build-min: no $rsp (run: lake build $exe)" >&2; exit 2; }
+
+toolchain="$(lean --print-prefix)"
+cc="$toolchain/bin/clang"
+out=".lake/build/rt-min"
+mkdir -p "$out"
+
+# The minimal runtime. platform_hosted.o comes from Lake's link line already.
+"$os/scripts/print-runtime" "$out/printed"
+objects=()
+for source in "$os"/rt/*.c "$out"/printed/*.c; do
+  case "$source" in */rt/platform_*.c | */rt/aarch64_atomics.c) continue ;; esac
+  object="$out/$(basename "${source%.c}").o"
+  # Freestanding, with only the compiler's own headers: the runtime may not lean on a C library.
+  "$cc" -c -O2 -Wall -Wextra -Werror -ffreestanding -nostdinc -isystem "$toolchain/include/clang" \
+    -I "$toolchain/include" -I "$os/rt" -fdata-sections -ffunction-sections \
+    ${extra[@]+"${extra[@]}"} -o "$object" "$source"
+  objects+=("$object")
+done
+
+# Lake's link line: keep the objects, the search paths and compiled Lean; drop every other library.
+args=()
+while IFS= read -r line; do
+  arg="${line#\"}"
+  arg="${arg%\"}"
+  case "$arg" in
+    -lInit | -lStd) args+=("$arg") ;;
+    # On Linux, Lean's toolchain carries its own C library and names its pieces on the link line; the C
+    # start-up code needs them. They stay: this is the hosted platform, which does stand on a C library.
+    -lc | -lc_nonshared | -l:ld.so | -lpthread_nonshared) args+=("$arg") ;;
+    -l* | -pthread) ;;
+    # Programs from Mini/ that Lake printed for Lean's own runtime: the runtime here has its own copies.
+    */printed/*.o) ;;
+    *) args+=("$arg") ;;
+  esac
+done < "$rsp"
+
+case "$(uname -s)" in
+  Darwin) export MACOSX_DEPLOYMENT_TARGET=99.0; strip=(-Wl,-dead_strip) ;;
+  *) strip=(-Wl,--gc-sections) ;;
+esac
+
+"$cc" -o ".lake/build/bin/$exe-min" "${args[@]}" "${objects[@]}" "${strip[@]}" ${extra[@]+"${extra[@]}"}
+echo ".lake/build/bin/$exe-min"

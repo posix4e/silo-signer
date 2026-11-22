@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Builds a 100% bare-metal AArch64 Tricorder OS image (zero Linux, zero Android, zero libc, zero SDK):
+#
+#   scripts/build-bare <probe|os> <qemu|komodo> [regtest|signet|mainnet]
+#
+# Outputs:
+#   build/bare-<kind>-<board>-<net>/tricorder.elf
+#   build/bare-<kind>-<board>-<net>/Image          (flat ARM64 Linux Image — bootable by QEMU & ABL!)
+#   build/bare-<kind>-<board>-<net>/boot.img       (AOSP boot_img_hdr_v4, zero ramdisk)
+#   build/bare-<kind>-<board>-<net>/vbmeta.img     (AVB2 RSA-4096 signed vbmeta covering boot.img)
+#   build/bare-<kind>-<board>-<net>/avb_pkmd.bin   (for `fastboot flash avb_custom_key`)
+set -euo pipefail
+
+kind="${1:-probe}"
+board="${2:-qemu}"
+net="${3:-regtest}"
+
+case "$kind" in
+  probe) lake_target="tricorder-probe"; init_sym="initialize_tricorder_Tricorder_ProbeMain" ;;
+  os)    lake_target="tricorder-os";    init_sym="initialize_tricorder_Tricorder_OsMain" ;;
+  *) echo "usage: scripts/build-bare <probe|os> <qemu|komodo> [regtest|signet|mainnet]" >&2; exit 2 ;;
+esac
+
+case "$board" in
+  qemu)   load_base="0x40200000" ;;
+  komodo) load_base="0xA0000000" ;;
+  *) echo "unknown board: $board (expected qemu or komodo)" >&2; exit 2 ;;
+esac
+
+case "$net" in
+  regtest | signet | mainnet) ;;
+  *) echo "unknown network: $net (expected regtest, signet, or mainnet)" >&2; exit 2 ;;
+esac
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+# 1. Select build-time network in Tricorder/BuildConfig.lean (only rewrite if changed).
+cfg="Tricorder/BuildConfig.lean"
+want="import Tricorder.Network
+
+/-! Build-time network selection (\`scripts/build-bare\` sets this for \`regtest\`, \`signet\`, or \`mainnet\`). -/
+
+namespace Tricorder.BuildConfig
+
+def activeNetwork : Network := .$net
+
+end Tricorder.BuildConfig"
+if [ ! -f "$cfg" ] || [ "$(cat "$cfg")" != "$want" ]; then
+  printf '%s\n' "$want" > "$cfg"
+fi
+
+# 2. Check proof gate & build Lean C closure + pure-Lean tools.
+echo "==> lake build TricorderGate mini-print mkboot $lake_target ($board/$net)"
+lake build TricorderGate mini-print mkboot "$lake_target"
+
+rsp=".lake/build/bin/$lake_target.rsp"
+[ -f "$rsp" ] || { echo "build-bare: missing $rsp" >&2; exit 2; }
+
+toolchain="$(lean --print-prefix)"
+cc="$toolchain/bin/clang"
+version="$(lean --version | sed -E 's/.*version ([0-9.]+).*/\1/')"
+cross="${TRICORDER_ARM64_TOOLCHAIN:-$HOME/.elan/cross/lean-$version-linux_aarch64}"
+lean_libs="$cross/lib/lean"
+[ -f "$lean_libs/libInit.a" ] || {
+  echo "build-bare: missing $lean_libs/libInit.a" >&2
+  exit 2
+}
+
+out="build/bare-$kind-$board-$net"
+mkdir -p "$out/obj" "$out/printed"
+if [ -x "$toolchain/bin/ld.lld" ]; then
+  ld="$toolchain/bin/ld.lld"
+else
+  ln -sf "$toolchain/bin/ld64.lld" "$out/ld.lld"
+  ld="$out/ld.lld"
+fi
+
+# 3. Print verified Mini/ runtime C and compile AArch64 bare-metal boot stub + runtime.
+"$root/scripts/print-runtime" "$out/printed"
+
+asm_flags=(--target=aarch64-none-elf -c)
+c_common=(--target=aarch64-none-elf -ffreestanding -nostdinc -fno-builtin -fno-stack-protector
+  -mstrict-align -march=armv8.4-a -ffixed-x18
+  -isystem "$toolchain/include/clang" -I "$toolchain/include" -I "$root/rt" -I "$root/boot/aarch64"
+  -O2 -fdata-sections -ffunction-sections)
+
+objects=()
+for s in "$root/boot/aarch64/entry.S" "$root/boot/aarch64/vectors.S"; do
+  obj="$out/obj/boot_$(basename "${s%.S}").o"
+  "$cc" "${asm_flags[@]}" -o "$obj" "$s"
+  objects+=("$obj")
+done
+
+for src in "$root/boot/aarch64/early.c" "$root/boot/aarch64/checks.c" \
+           "$root"/rt/*.c "$out"/printed/*.c \
+           "$root/rt/bare/libc.c" "$root/rt/bare/hw.c" "$root/rt/bare/platform.c"; do
+  obj="$out/obj/rt_$(basename "${src%.c}").o"
+  "$cc" -c "${c_common[@]}" -Wall -Wextra -Werror -o "$obj" "$src"
+  objects+=("$obj")
+done
+
+# 4. Cross-compile every Lean-generated C module in exact transitive closure (cached by mtime).
+echo "==> cross-compiling Lean C modules for aarch64-none-elf ($kind/$board/$net)"
+lean_objs=()
+while IFS= read -r line; do
+  arg="${line#\"}"
+  arg="${arg%\"}"
+  case "$arg" in
+    *.c.o.export)
+      src="${arg%.o.export}"
+      [ -f "$src" ] || { echo "build-bare: missing C source $src" >&2; exit 2; }
+      key="$(printf '%s' "$src" | tr '/.' '__')"
+      obj="$out/obj/lean_${key}.o"
+      if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+        "$cc" -c "${c_common[@]}" -DNDEBUG -w -o "$obj" "$src"
+      fi
+      lean_objs+=("$obj")
+      ;;
+  esac
+done < "$rsp"
+
+# 5. Link static bare-metal AArch64 ELF (zero libc, zero Linux, zero Android!).
+# IMPORTANT: `--defsym=LOAD_BASE=...` MUST come BEFORE `-T link.ld` so lld binds `PROVIDE(LOAD_BASE = ...)`!
+echo "==> linking $out/tricorder.elf (${#lean_objs[@]} Lean modules, LOAD_BASE=$load_base)"
+"$ld" -static -nostdlib \
+  --defsym="LOAD_BASE=$load_base" \
+  --defsym="initialize_tricorder_entry=$init_sym" \
+  -T "$root/boot/aarch64/link.ld" \
+  --gc-sections --strip-all \
+  -o "$out/tricorder.elf" \
+  "${objects[@]}" "${lean_objs[@]}" \
+  --start-group "$lean_libs/libInit.a" "$lean_libs/libStd.a" --end-group
+
+ls -lh "$out/tricorder.elf"
+
+# 6. Flatten ELF -> ARM64 Linux Image via pure-Lean mkboot (zero GNU objcopy!).
+.lake/build/bin/mkboot image "$out/tricorder.elf" "$out/Image"
+
+# 7. Ensure local RSA-4096 AVB2 key exists and pack signed boot.img v4 + vbmeta.img + avb_pkmd.bin!
+avbdir="build/avb-keys"
+mkdir -p "$avbdir"
+if [ ! -f "$avbdir/avb_rsa4096.pem" ] || [ ! -f "$avbdir/avb_rsa4096_pub.pem" ]; then
+  echo "==> generating local RSA-4096 AVB2 signing key in $avbdir/"
+  openssl genrsa -out "$avbdir/avb_rsa4096.pem" 4096 2>/dev/null
+  openssl rsa -in "$avbdir/avb_rsa4096.pem" -pubout -out "$avbdir/avb_rsa4096_pub.pem" 2>/dev/null
+fi
+
+.lake/build/bin/mkboot pack "$out/Image" \
+  "$avbdir/avb_rsa4096.pem" "$avbdir/avb_rsa4096_pub.pem" \
+  "$out/boot.img" "$out/vbmeta.img" "$out/avb_pkmd.bin" \
+  "tricorder.board=$board tricorder.net=$net"
+ls -lh "$out/Image" "$out/boot.img" "$out/vbmeta.img" "$out/avb_pkmd.bin"

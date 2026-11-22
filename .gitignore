@@ -1,0 +1,9 @@
+/.lake/
+/build/
+*.apk
+*.keystore
+*.pem
+*.der
+*.ppm
+*.png
+.DS_Store

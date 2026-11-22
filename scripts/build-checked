@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Links a built Lean executable against the minimal runtime with memory and undefined-behaviour checking on.
+#
+#   scripts/build-checked <executable>
+#
+# Like scripts/build-min, with three differences: the runtime is compiled by the system compiler (Lean's
+# bundled one ships no sanitizer runtime) under AddressSanitizer and UndefinedBehaviorSanitizer; the
+# allocator is rt/hosted/alloc_checked.c, one C-library block per request, so every block is guarded; and
+# any report stops the program. The compiled Lean is the same objects as ever and is not instrumented: this
+# checks the C underneath it. The result is .lake/build/bin/<executable>-checked.
+set -euo pipefail
+
+# The OS's own files (boot/, rt/, the other scripts) are found beside this script, so a project that has
+# silo-os as a dependency runs it from its own directory: .lake/packages/silo-os/scripts/build-checked ...
+os="$(cd "$(dirname "$0")/.." && pwd)"
+
+exe="${1:?usage: scripts/build-checked <executable>}"
+rsp=".lake/build/bin/$exe.rsp"
+[ -f "$rsp" ] || { echo "build-checked: no $rsp (run: lake build $exe)" >&2; exit 2; }
+
+toolchain="$(lean --print-prefix)"
+cc="${CC:-cc}"
+checks=(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+out=".lake/build/rt-checked"
+mkdir -p "$out"
+
+objects=()
+# The allocator is the testing one; the rest of what is printed from Mini/ is the real thing.
+"$os/scripts/print-runtime" "$out/printed"
+for source in "$os"/rt/*.c "$out"/printed/*.c "$os/rt/hosted/alloc_checked.c"; do
+  case "$source" in */printed/alloc.c) continue ;; esac
+  case "$source" in */rt/platform_*.c | */rt/aarch64_atomics.c) continue ;; esac
+  object="$out/$(basename "${source%.c}").o"
+  "$cc" -c -g -O1 -Wall -Wextra -Werror -I "$toolchain/include" -I "$os/rt" "${checks[@]}" -o "$object" "$source"
+  objects+=("$object")
+done
+
+# Lake's link line: keep the objects and compiled Lean. The system compiler finds its own libraries, so the
+# toolchain's search paths and linker choice go, except the directory that holds Init and Std.
+args=()
+pending=""
+while IFS= read -r line; do
+  arg="${line#\"}"
+  arg="${arg%\"}"
+  if [ -n "$pending" ]; then
+    if [ "$pending" = -L ] && [[ "$arg" == */lib/lean ]]; then args+=(-L "$arg"); fi
+    pending=""
+    continue
+  fi
+  case "$arg" in
+    -L | --sysroot) pending="$arg" ;;
+    -lInit | -lStd) args+=("$arg") ;;
+    -l* | -pthread | -fuse-ld=* | -Wl,*) ;;
+    # Programs from Mini/ that Lake printed for Lean's own runtime: the runtime here has its own copies.
+    */printed/*.o) ;;
+    *) args+=("$arg") ;;
+  esac
+done < "$rsp"
+
+# Dead code has to go, as in the real link: most of Init refers to runtime functions that do not exist here.
+case "$(uname -s)" in
+  Darwin) strip=(-Wl,-dead_strip) ;;
+  *) strip=(-Wl,--gc-sections) ;;
+esac
+
+# The runtime's objects go first and compiled Lean's libraries are searched as a group: the runtime calls
+# into Init and Init calls into the runtime, and a linker that reads its line once from left to right
+# (the system one on Linux) has to be able to go round.
+libs=()
+rest=()
+for arg in "${args[@]}"; do
+  case "$arg" in
+    -lInit | -lStd) libs+=("$arg") ;;
+    *) rest+=("$arg") ;;
+  esac
+done
+case "$(uname -s)" in
+  Darwin) group=("${libs[@]}") ;;
+  *) group=(-Wl,--start-group "${libs[@]}" -Wl,--end-group) ;;
+esac
+
+"$cc" -o ".lake/build/bin/$exe-checked" "${objects[@]}" "${rest[@]}" "${group[@]}" "${strip[@]}" "${checks[@]}"
+echo ".lake/build/bin/$exe-checked"

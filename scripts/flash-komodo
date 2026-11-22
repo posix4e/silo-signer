@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Safe Pixel 9 Pro XL (`komodo`) fastboot flashing helper for Tricorder Bare-Metal OS.
+#
+# Modes:
+#   scripts/flash-komodo slot-b <probe|os> [signet|regtest|mainnet]
+#     Flashes Tricorder to inactive slot `_b` (preserving GrapheneOS on slot `_a`!)
+#     Requires bootloader to be unlocked (`fastboot flashing unlock`).
+#
+#   scripts/flash-komodo relock [mainnet|signet]
+#     Flashes your local RSA-4096 `avb_pkmd.bin` to `avb_custom_key`, flashes signed `vbmeta.img`
+#     and `boot.img`, and prints the final `fastboot flashing lock` command.
+set -euo pipefail
+
+mode="${1:-}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+case "$mode" in
+  slot-b)
+    kind="${2:-probe}"
+    net="${3:-signet}"
+    dir="$root/build/bare-$kind-komodo-$net"
+    [ -f "$dir/boot.img" ] || { echo "missing $dir/boot.img (run scripts/build-bare $kind komodo $net)" >&2; exit 2; }
+    echo "==> checking fastboot device (komodo)"
+    fastboot devices
+    unlocked="$(fastboot getvar unlocked 2>&1 | awk '/unlocked:/ {print $2}')"
+    if [ "$unlocked" != "yes" ]; then
+      echo "REFUSED: bootloader is locked (unlocked=$unlocked)." >&2
+      echo "To unlock (WARNING: wipes userdata!):" >&2
+      echo "  1. Enable OEM unlocking in Developer options" >&2
+      echo "  2. adb reboot bootloader" >&2
+      echo "  3. fastboot flashing unlock" >&2
+      exit 1
+    fi
+    echo "==> flashing $dir/boot.img -> boot_b (slot _a untouched!)"
+    fastboot flash boot_b "$dir/boot.img"
+    echo "==> flashing $dir/vbmeta.img -> vbmeta_b (verification disabled while unlocked)"
+    fastboot flash --disable-verity --disable-verification vbmeta_b "$dir/vbmeta.img"
+    echo "==> switching active slot to _b and rebooting into bare-metal Tricorder OS!"
+    fastboot set_active b
+    fastboot reboot
+    ;;
+  relock)
+    net="${2:-mainnet}"
+    dir="$root/build/bare-os-komodo-$net"
+    [ -f "$dir/avb_pkmd.bin" ] && [ -f "$dir/vbmeta.img" ] && [ -f "$dir/boot.img" ] || {
+      echo "missing images in $dir (run scripts/build-bare os komodo $net)" >&2
+      exit 2
+    }
+    fastboot devices
+    echo "==> flashing avb_custom_key ($dir/avb_pkmd.bin)"
+    fastboot erase avb_custom_key || true
+    fastboot flash avb_custom_key "$dir/avb_pkmd.bin"
+    echo "==> flashing signed vbmeta + boot"
+    fastboot flash vbmeta "$dir/vbmeta.img"
+    fastboot flash boot "$dir/boot.img"
+    echo "==> Ready to relock Titan M2 verified boot! Run when ready:"
+    echo "    fastboot flashing lock"
+    ;;
+  *)
+    echo "usage:" >&2
+    echo "  scripts/flash-komodo slot-b <probe|os> [signet|regtest|mainnet]" >&2
+    echo "  scripts/flash-komodo relock [mainnet|signet]" >&2
+    exit 2
+    ;;
+esac

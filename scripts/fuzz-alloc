@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Sets the allocator as its language defines it against the allocator as printed and compiled.
+#
+#   scripts/fuzz-alloc [rounds] [requests a round] [seed]        (defaults: 200, 400, the time)
+#
+# Prints the allocator's C from Mini/Alloc.lean, compiles it with fuzz/alloc_harness.c under AddressSanitizer
+# and UBSan, and has mini-fuzz make up requests and put each to both. They have to agree on every answer.
+# A run that fails says which round and seed, so that it can be run again.
+set -euo pipefail
+os="$(cd "$(dirname "$0")/.." && pwd)"
+rounds="${1:-200}"
+requests="${2:-400}"
+seed="${3:-$(date +%s)}"
+out=.lake/build/fuzz
+mkdir -p "$out"
+"$os/scripts/print-runtime" "$out/printed"
+"${CC:-cc}" -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+  -I "$(lean --print-prefix)/include" -I "$os/rt" -o "$out/alloc-harness" \
+  "$os/fuzz/alloc_harness.c" "$out/printed/alloc.c"
+echo "seed $seed"
+ASAN_OPTIONS=detect_leaks=0 .lake/build/bin/mini-fuzz "$out/alloc-harness" "$rounds" "$requests" "$seed"

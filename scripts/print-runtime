@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Prints the parts of the runtime that are programs in Mini/ as C, into a directory.
+#
+#   scripts/print-runtime <directory>
+#
+# The allocator, the freeing of objects, big numbers in memory and arrays are written in a small language in
+# Lean (Mini/). Their C is printed whenever the runtime is built and is not kept in the repository, so
+# there is one text to read and change. Needs `lake build mini-print`, in this project or in the one that
+# has it as a dependency.
+set -euo pipefail
+to="${1:?usage: scripts/print-runtime <directory>}"
+os="$(cd "$(dirname "$0")/.." && pwd)"
+printer=.lake/build/bin/mini-print
+[ -x "$printer" ] || printer="$os/.lake/build/bin/mini-print"
+[ -x "$printer" ] || { echo "print-runtime: no mini-print (run: lake build mini-print)" >&2; exit 2; }
+mkdir -p "$to"
+for part in alloc free number array small hash string secret; do
+  "$printer" "$part" > "$to/$part.c"
+done

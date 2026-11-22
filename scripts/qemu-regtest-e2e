@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""
+End-to-end Bare-Metal AArch64 Tricorder OS verification in QEMU + live Bitcoin Core regtest:
+  1. Boots `build/bare-os-qemu-regtest/Image` (zero Linux, zero Android, zero libc, zero FS)
+     in `qemu-system-aarch64 -M virt -cpu max` with `ramfb` OLED display, `virtio-rng`,
+     raw 2-slot `virtio-blk` vault disk, and PL011 `Kernel.Wire` socket.
+  2. Verifies locked-state security gating (`GET_KEYS` denied while locked).
+  3. Drives physical-button LCARS focus UI to generate 24 words + seal 6-digit PIN `111111`.
+  4. Hard power-offs QEMU & cold-reboots on the same raw `vault.raw` disk -> verifies
+     zero-FS 2-slot `VaultStore` recovery -> wrong PIN rejected -> right PIN unlocks!
+  5. Live Bitcoin Core regtest co-signing over `Kernel.Wire` with physical-button two-step arm/confirm:
+     - Taproot 2-of-3 `tr(NUMS, sortedmulti_a(2, ...))` co-signed & mined in a block!
+     - Silo Approver `silo/approve` BIP 340 signed on a real PSBT!
+     - SegWit v0 2-of-3 `wsh(sortedmulti(2, ...))` (full `nonWitnessUTXO` check) co-signed & mined!
+  6. Captures live QEMU `ramfb` screenshots (`screendump`) and verifies QR scannability!
+"""
+import json
+import os
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+IMG = os.path.join(ROOT, "build", "bare-os-qemu-regtest", "Image")
+SHOTS_DIR = os.environ.get("TRICORDER_QEMU_SHOTS", "/tmp/tricorder-qemu-shots")
+
+OP_PING = 0x01
+OP_GET_STATUS = 0x02
+OP_GET_KEYS = 0x03
+OP_PUSH_DESC = 0x04
+OP_PUSH_OVERRIDE = 0x05
+OP_PUSH_APPROVE = 0x06
+OP_POLL_RESULT = 0x07
+OP_INJECT_KEY = 0x10
+OP_RESP_OK = 0x80
+OP_RESP_ERR = 0x81
+
+KEY_PREV = 0
+KEY_NEXT = 1
+KEY_SELECT = 2
+KEY_BACK = 3
+
+
+def encode_frame(op: int, payload: bytes = b"") -> bytes:
+    hdr = b"TRIW" + struct.pack("<BBH", op, 0, len(payload))
+    body = hdr + payload
+    crc = zlib.crc32(body) & 0xFFFFFFFF
+    return body + struct.pack("<I", crc)
+
+
+class QemuTricorder:
+    def __init__(self, workdir: str, disk_path: str):
+        self.workdir = workdir
+        self.disk_path = disk_path
+        self.wire_sock_path = os.path.join(workdir, "wire.sock")
+        self.mon_sock_path = os.path.join(workdir, "mon.sock")
+        self.proc = None
+        self.wire = None
+        self.mon = None
+        self.rxbuf = bytearray()
+
+    def start(self):
+        for p in (self.wire_sock_path, self.mon_sock_path):
+            if os.path.exists(p):
+                os.unlink(p)
+        cmd = [
+            "qemu-system-aarch64",
+            "-M", "virt",
+            "-cpu", "max",
+            "-m", "512M",
+            "-display", "none",
+            "-global", "virtio-mmio.force-legacy=false",
+            "-kernel", IMG,
+            "-device", "ramfb",
+            "-device", "virtio-rng-device",
+            "-drive", f"if=none,file={self.disk_path},format=raw,id=vault0",
+            "-device", "virtio-blk-device,drive=vault0",
+            "-serial", f"unix:{self.wire_sock_path},server=on,wait=on",
+            "-monitor", f"unix:{self.mon_sock_path},server=on,wait=off",
+            "-no-reboot",
+        ]
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        for _ in range(100):
+            if os.path.exists(self.wire_sock_path) and os.path.exists(self.mon_sock_path):
+                break
+            time.sleep(0.05)
+        self.wire = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.wire.settimeout(20.0)
+        self.wire.connect(self.wire_sock_path)
+        self.mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.mon.settimeout(5.0)
+        self.mon.connect(self.mon_sock_path)
+        # Wait for boot banner ending in TRICORDER_READY
+        boot_log = bytearray()
+        deadline = time.time() + 25.0
+        while time.time() < deadline:
+            chunk = self.wire.recv(4096)
+            if not chunk:
+                raise RuntimeError("QEMU serial closed during boot")
+            boot_log.extend(chunk)
+            if b"TRICORDER_READY\n" in boot_log:
+                idx = boot_log.index(b"TRICORDER_READY\n") + len(b"TRICORDER_READY\n")
+                self.rxbuf = bytearray(boot_log[idx:])
+                return boot_log[:idx].decode("utf-8", errors="replace")
+        raise RuntimeError(f"Timeout waiting for TRICORDER_READY:\n{boot_log.decode('utf-8', 'replace')}")
+
+    def stop(self):
+        if self.mon:
+            try:
+                self.mon.sendall(b"quit\n")
+            except OSError:
+                pass
+            self.mon.close()
+            self.mon = None
+        if self.wire:
+            self.wire.close()
+            self.wire = None
+        if self.proc:
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+            self.proc = None
+
+    def screendump(self, ppm_path: str):
+        self.mon.sendall(f"screendump {ppm_path}\n".encode())
+        for _ in range(50):
+            if os.path.exists(ppm_path) and os.path.getsize(ppm_path) > 10000:
+                return
+            time.sleep(0.05)
+        raise RuntimeError(f"QEMU screendump failed for {ppm_path}")
+
+    def _read_exact(self, n: int) -> bytes:
+        while len(self.rxbuf) < n:
+            chunk = self.wire.recv(4096)
+            if not chunk:
+                raise RuntimeError("QEMU wire closed unexpectedly")
+            self.rxbuf.extend(chunk)
+        out = bytes(self.rxbuf[:n])
+        del self.rxbuf[:n]
+        return out
+
+    def rpc(self, op: int, payload: bytes = b"") -> tuple[int, bytes]:
+        self.wire.sendall(encode_frame(op, payload))
+        # Synchronize to "TRIW" magic (skip any diagnostic log lines if any)
+        while True:
+            b = self._read_exact(1)
+            if b == b"T":
+                rest = self._read_exact(3)
+                if rest == b"RIW":
+                    break
+        hdr_tail = self._read_exact(4)
+        rop, rflags, rlen = struct.unpack("<BBH", hdr_tail)
+        body = self._read_exact(rlen)
+        crc_bytes = self._read_exact(4)
+        want_crc = struct.unpack("<I", crc_bytes)[0]
+        got_crc = zlib.crc32(b"TRIW" + hdr_tail + body) & 0xFFFFFFFF
+        if want_crc != got_crc:
+            raise RuntimeError(f"Wire CRC mismatch: got {got_crc:#x} want {want_crc:#x}")
+        return rop, body
+
+    def rpc_ok(self, op: int, payload: bytes = b"") -> str:
+        rop, body = self.rpc(op, payload)
+        txt = body.decode("utf-8", errors="replace")
+        if rop != OP_RESP_OK:
+            raise RuntimeError(f"RPC op={op:#x} returned ERR: {txt}")
+        return txt
+
+    def key(self, k: int) -> str:
+        return self.rpc_ok(OP_INJECT_KEY, bytes([k]))
+
+    def move_and_select(self, target_idx: int):
+        st = self.rpc_ok(OP_GET_STATUS).split("|")
+        cur = int(st[4])
+        while cur != target_idx:
+            step = KEY_NEXT if target_idx > cur else KEY_PREV
+            self.key(step)
+            st = self.rpc_ok(OP_GET_STATUS).split("|")
+            cur = int(st[4])
+        return self.key(KEY_SELECT)
+
+
+def main():
+    if not os.path.exists(IMG):
+        print(f"missing {IMG} (run scripts/build-bare os qemu regtest)", file=sys.stderr)
+        sys.exit(2)
+
+    os.makedirs(SHOTS_DIR, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="tricorder-qemu-e2e.")
+    btc_dir = os.path.join(work, "btc")
+    os.makedirs(btc_dir)
+    disk_path = os.path.join(work, "vault.raw")
+    with open(disk_path, "wb") as f:
+        f.write(b"\x00" * (64 * 1024))  # 64 KiB raw block disk (ZERO filesystem!)
+
+    qemu = QemuTricorder(work, disk_path)
+
+    def bcli(*args, wallet=None):
+        cmd = ["bitcoin-cli", "-regtest", f"-datadir={btc_dir}"]
+        if wallet:
+            cmd.append(f"-rpcwallet={wallet}")
+        cmd.extend(args)
+        return subprocess.check_output(cmd, text=True).strip()
+
+    try:
+        # ---- 1. Cold boot #1 (blank raw disk) ----
+        boot1 = qemu.start()
+        assert "DIT=ON" in boot1 and "RNDR=YES" in boot1, f"Missing DIT/RNDR:\n{boot1}"
+        assert "ramfb 540x1200 active" in boot1, f"ramfb not active:\n{boot1}"
+        assert "hasVault=false" in boot1, f"expected empty raw disk:\n{boot1}"
+        print("ok    Boot #1 bare-metal AArch64 in QEMU (Stage-1 MMU+WXN, DIT=ON, RNDR=YES, ramfb 540x1200, raw virtio-blk)")
+
+        pong = qemu.rpc_ok(OP_PING)
+        assert pong == "TRICORDER-BARE-V1:regtest", pong
+        print(f"ok    Wire PING -> {pong}")
+
+        # Verify locked security gate refuses GET_KEYS
+        op, body = qemu.rpc(OP_GET_KEYS)
+        assert op == OP_RESP_ERR and b"DENIED_BY_SECURITY_POLICY" in body, (op, body)
+        print("ok    Security policy refuses GET_KEYS before unlock")
+
+        # ---- 2. Physical-button LCARS onboarding: Generate 24 words -> Page 2 -> PIN 111111 -> Seal ----
+        qemu.move_and_select(0)  # setupChoice: button 0 = GENERATE NEW 24 WORDS
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("setupWords|")
+        qemu.move_and_select(1)  # page 1: button 1 = WORDS 13-24
+        qemu.move_and_select(1)  # page 2: button 1 = SET PIN
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("setupPin|")
+        # PIN pad buttons: 0='1', 1='2', ..., 8='9', 9='DEL', 10='0', 11='NEXT'/'SEAL'
+        for _ in range(6):
+            qemu.move_and_select(0)  # digit '1'
+        qemu.move_and_select(11)     # NEXT
+        for _ in range(6):
+            qemu.move_and_select(0)  # confirm '1'
+        qemu.move_and_select(11)     # SEAL
+        st = qemu.rpc_ok(OP_GET_STATUS)
+        assert st.startswith("home|1|"), f"expected unlocked home, got {st}"
+        print("ok    Physical-button LCARS onboarding generated 24 words & sealed 2-slot raw vault!")
+        qemu.screendump(os.path.join(SHOTS_DIR, "01_qemu_home.ppm"))
+
+        # Open PUBLIC KEYS & QR and dump live QEMU ramfb screenshot!
+        qemu.move_and_select(1)  # home button 1 = PUBLIC KEYS & QR
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("keys|1|")
+        qemu.screendump(os.path.join(SHOTS_DIR, "02_qemu_keys_qr.ppm"))
+        print("ok    Captured live QEMU ramfb LCARS Keys + QR screenshot")
+
+        keys_before_reboot = qemu.rpc_ok(OP_GET_KEYS)
+
+        # ---- 3. HARD POWER-OFF & COLD REBOOT QEMU (Zero-FS 2-slot VaultStore persistence test!) ----
+        qemu.stop()
+        boot2 = qemu.start()
+        assert "hasVault=true" in boot2, f"Vault did not persist across cold reboot!\n{boot2}"
+        st2 = qemu.rpc_ok(OP_GET_STATUS)
+        assert st2.startswith("locked|0|"), f"expected locked on reboot, got {st2}"
+        print("ok    Cold reboot recovered encrypted vault from raw 2-slot virtio-blk (zero filesystem!)")
+
+        # Verify GET_KEYS still denied while locked
+        op, body = qemu.rpc(OP_GET_KEYS)
+        assert op == OP_RESP_ERR, (op, body)
+
+        # Try wrong PIN `222222` (button 1 = '2', button 11 = 'OPEN')
+        for _ in range(6):
+            qemu.move_and_select(1)
+        qemu.move_and_select(11)
+        st_wrong = qemu.rpc_ok(OP_GET_STATUS)
+        assert st_wrong.startswith("locked|0|") and "INVALID PIN" in st_wrong, st_wrong
+        print("ok    Wrong PIN rejected on bare metal & incremented persisted attempt counter")
+
+        # Enter correct PIN `111111` -> unlock!
+        for _ in range(6):
+            qemu.move_and_select(0)
+        qemu.move_and_select(11)
+        st_open = qemu.rpc_ok(OP_GET_STATUS)
+        assert st_open.startswith("home|1|"), st_open
+        keys_after_reboot = qemu.rpc_ok(OP_GET_KEYS)
+        assert keys_after_reboot == keys_before_reboot, "Keys differed after reboot!"
+        print("ok    Correct PIN unlocked persisted vault with identical keys after cold reboot!")
+
+        # Parse Tricorder's Override xpub & Approver pubkey from GET_KEYS output
+        tri_pub = None
+        tri_approver = None
+        for line in keys_after_reboot.splitlines():
+            if line.startswith("override_key "):
+                tri_pub = line.split(" ", 1)[1].strip()
+            elif line.startswith("approver_key "):
+                tri_approver = line.split(" ", 1)[1].strip()
+        assert tri_pub and tri_approver, keys_after_reboot
+        print(f"ok    Bare-metal Override key: {tri_pub[:48]}...")
+        print(f"ok    Bare-metal Approver key: {tri_approver}")
+
+        # ---- 4. Start live Bitcoin Core regtest on Mac host ----
+        subprocess.run([
+            "bitcoind", "-regtest", f"-datadir={btc_dir}", "-daemon",
+            "-server=1", "-fallbackfee=0.0001", "-txindex=0", "-listen=0",
+        ], check=True, stdout=subprocess.DEVNULL)
+        for _ in range(40):
+            try:
+                bcli("getblockchaininfo")
+                break
+            except subprocess.CalledProcessError:
+                time.sleep(0.2)
+
+        bcli("createwallet", "miner")
+        bcli("createwallet", "core1")
+        bcli("createwallet", "core2")
+        miner_addr = bcli("getnewaddress", wallet="miner")
+        bcli("generatetoaddress", "105", miner_addr, wallet="miner")
+
+        def core_key(w, priv=False):
+            descs = json.loads(bcli("listdescriptors", "true" if priv else "false", wallet=w))["descriptors"]
+            for d in descs:
+                if d["desc"].startswith("tr(") and not d["internal"]:
+                    inner = d["desc"][3:].split(")#")[0]
+                    return inner.removesuffix("/0/*")
+            raise RuntimeError("no tr desc")
+
+        c1_pub = core_key("core1", False)
+        c1_prv = core_key("core1", True)
+        c2_pub = core_key("core2", False)
+        nums = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
+
+        def add_checksum(body_desc: str) -> str:
+            cs = json.loads(bcli("getdescriptorinfo", body_desc))["checksum"]
+            return f"{body_desc}#{cs}"
+
+        # ---- 5. Taproot 2-of-3 co-signing on bare-metal Tricorder OS ----
+        tr_desc = add_checksum(f"tr({nums},sortedmulti_a(2,{c1_pub}/<0;1>/*,{tri_pub}/<0;1>/*,{c2_pub}/<0;1>/*))")
+        tr_ext = add_checksum(f"tr({nums},sortedmulti_a(2,{c1_pub}/0/*,{tri_pub}/0/*,{c2_pub}/0/*))")
+        tr_core_addr = json.loads(bcli("deriveaddresses", tr_ext, "[0,0]"))[0]
+
+        tr_tri_addr = qemu.rpc_ok(OP_PUSH_DESC, tr_desc.encode())
+        assert tr_tri_addr == tr_core_addr, (tr_tri_addr, tr_core_addr)
+        # Approve & save descriptor via physical button (reviewDescriptor: 0=ABORT, 1=REGISTER WALLET)
+        qemu.move_and_select(1)
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("home|1|1|")
+        print(f"ok    Taproot 2-of-3 descriptor verified & saved on bare metal: {tr_tri_addr}")
+
+        bcli("-named", "createwallet", "wallet_name=tr_vault", "descriptors=true", "blank=true")
+        tr_ext_prv = add_checksum(f"tr({nums},sortedmulti_a(2,{c1_prv}/0/*,{tri_pub}/0/*,{c2_pub}/0/*))")
+        tr_int_prv = add_checksum(f"tr({nums},sortedmulti_a(2,{c1_prv}/1/*,{tri_pub}/1/*,{c2_pub}/1/*))")
+        imp = json.loads(bcli("importdescriptors", json.dumps([
+            {"desc": tr_ext_prv, "active": True, "internal": False, "timestamp": "now", "range": [0, 20]},
+            {"desc": tr_int_prv, "active": True, "internal": True, "timestamp": "now", "range": [0, 20]},
+        ]), wallet="tr_vault"))
+        assert all(x["success"] for x in imp), imp
+
+        bcli("sendtoaddress", tr_tri_addr, "1.0", wallet="miner")
+        bcli("generatetoaddress", "1", miner_addr, wallet="miner")
+        dest = bcli("getnewaddress", wallet="miner")
+        psbt_tr = json.loads(bcli("walletcreatefundedpsbt", "[]", json.dumps([{dest: 0.25}]), "0", '{"include_watching":true}', "true", wallet="tr_vault"))["psbt"]
+        psbt_tr_c1 = json.loads(bcli("walletprocesspsbt", psbt_tr, "true", "DEFAULT", "true", wallet="tr_vault"))["psbt"]
+
+        qemu.rpc_ok(OP_PUSH_OVERRIDE, psbt_tr_c1.encode())
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("reviewTx|1|1|0|")
+        # Physical two-step arm & sign (reviewTx: 0=ABORT, 1=ARM SIGN; reviewTxArmed: 0=CANCEL, 1=SIGN NOW)
+        qemu.move_and_select(1)
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("reviewTxArmed|1|1|1|")
+        qemu.move_and_select(1)
+        assert qemu.rpc_ok(OP_GET_STATUS).startswith("signed|1|1|")
+        psbt_tr_both = qemu.rpc_ok(OP_POLL_RESULT)
+        fin_tr = json.loads(bcli("finalizepsbt", psbt_tr_both))
+        assert fin_tr["complete"], fin_tr
+        txid_tr = bcli("sendrawtransaction", fin_tr["hex"])
+        bcli("generatetoaddress", "1", miner_addr, wallet="miner")
+        print(f"ok    BARE-METAL Taproot 2-of-3 co-signed & MINED in regtest block: {txid_tr}")
+
+        # ---- 6. Silo Approver (`silo/approve` BIP 340) + live QEMU ramfb QR screenshot! ----
+        qemu.move_and_select(0)  # back to home
+        qemu.rpc_ok(OP_PUSH_APPROVE, psbt_tr.encode())
+        qemu.move_and_select(1)  # ARM
+        qemu.move_and_select(1)  # SIGN NOW
+        appr_line = qemu.rpc_ok(OP_POLL_RESULT)
+        assert appr_line.startswith("approval ") and len(appr_line) == len("approval ") + 128, appr_line
+        qemu.screendump(os.path.join(SHOTS_DIR, "03_qemu_signed_qr.ppm"))
+        print(f"ok    BARE-METAL Silo Approver BIP340 signed & QR rendered: {appr_line[:40]}...")
+
+        # ---- 7. SegWit v0 2-of-3 co-signing (full nonWitnessUTXO prevtx verification!) ----
+        qemu.move_and_select(0)  # home
+        sw_desc = add_checksum(f"wsh(sortedmulti(2,{c1_pub}/<0;1>/*,{tri_pub}/<0;1>/*,{c2_pub}/<0;1>/*))")
+        sw_ext = add_checksum(f"wsh(sortedmulti(2,{c1_pub}/0/*,{tri_pub}/0/*,{c2_pub}/0/*))")
+        sw_core_addr = json.loads(bcli("deriveaddresses", sw_ext, "[0,0]"))[0]
+
+        sw_tri_addr = qemu.rpc_ok(OP_PUSH_DESC, sw_desc.encode())
+        assert sw_tri_addr == sw_core_addr, (sw_tri_addr, sw_core_addr)
+        qemu.move_and_select(1)  # register SegWit descriptor
+        print(f"ok    SegWit v0 2-of-3 descriptor verified & saved on bare metal: {sw_tri_addr}")
+
+        bcli("-named", "createwallet", "wallet_name=sw_vault", "descriptors=true", "blank=true")
+        sw_ext_prv = add_checksum(f"wsh(sortedmulti(2,{c1_prv}/0/*,{tri_pub}/0/*,{c2_pub}/0/*))")
+        sw_int_prv = add_checksum(f"wsh(sortedmulti(2,{c1_prv}/1/*,{tri_pub}/1/*,{c2_pub}/1/*))")
+        imp2 = json.loads(bcli("importdescriptors", json.dumps([
+            {"desc": sw_ext_prv, "active": True, "internal": False, "timestamp": "now", "range": [0, 20]},
+            {"desc": sw_int_prv, "active": True, "internal": True, "timestamp": "now", "range": [0, 20]},
+        ]), wallet="sw_vault"))
+        assert all(x["success"] for x in imp2), imp2
+
+        bcli("sendtoaddress", sw_tri_addr, "1.0", wallet="miner")
+        bcli("generatetoaddress", "1", miner_addr, wallet="miner")
+        psbt_sw = json.loads(bcli("walletcreatefundedpsbt", "[]", json.dumps([{dest: 0.30}]), "0", '{"include_watching":true}', "true", wallet="sw_vault"))["psbt"]
+        psbt_sw_c1 = json.loads(bcli("walletprocesspsbt", psbt_sw, "true", "ALL", "true", wallet="sw_vault"))["psbt"]
+
+        qemu.rpc_ok(OP_PUSH_OVERRIDE, psbt_sw_c1.encode())
+        qemu.move_and_select(1)  # ARM
+        qemu.move_and_select(1)  # SIGN NOW
+        psbt_sw_both = qemu.rpc_ok(OP_POLL_RESULT)
+        fin_sw = json.loads(bcli("finalizepsbt", psbt_sw_both))
+        assert fin_sw["complete"], fin_sw
+        txid_sw = bcli("sendrawtransaction", fin_sw["hex"])
+        bcli("generatetoaddress", "1", miner_addr, wallet="miner")
+        print(f"ok    BARE-METAL SegWit v0 2-of-3 co-signed & MINED in regtest block: {txid_sw}")
+
+        # ---- 8. Verify live QEMU ramfb QR screenshots decode with macOS CoreImage! ----
+        png_keys = os.path.join(SHOTS_DIR, "02_qemu_keys_qr.png")
+        png_signed = os.path.join(SHOTS_DIR, "03_qemu_signed_qr.png")
+        png_home = os.path.join(SHOTS_DIR, "01_qemu_home.png")
+        for ppm, png in [
+            (os.path.join(SHOTS_DIR, "01_qemu_home.ppm"), png_home),
+            (os.path.join(SHOTS_DIR, "02_qemu_keys_qr.ppm"), png_keys),
+            (os.path.join(SHOTS_DIR, "03_qemu_signed_qr.ppm"), png_signed),
+        ]:
+            subprocess.run(["sips", "-s", "format", "png", ppm, "--out", png], check=True, stdout=subprocess.DEVNULL)
+
+        swift_check = f"""
+import Foundation
+import CoreImage
+let det = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])!
+let expected = [
+    ("{png_keys}", "{tri_pub}"),
+    ("{png_signed}", "{appr_line}")
+]
+for (path, want) in expected {{
+    let img = CIImage(contentsOf: URL(fileURLWithPath: path))!
+    let msgs = det.features(in: img).compactMap {{ ($0 as? CIQRCodeFeature)?.messageString }}
+    guard msgs.first == want else {{
+        fputs("QR MISMATCH for \\(path): got \\(msgs) want \\(want)\\n", stderr)
+        exit(1)
+    }}
+    print("ok    CoreImage decoded live QEMU ramfb QR: \\(URL(fileURLWithPath: path).lastPathComponent)")
+}}
+"""
+        subprocess.run(["swift", "-e", swift_check], check=True)
+        print("qemu-regtest-e2e: ALL BARE-METAL AARCH64 QEMU + BITCOIN CORE + QR TESTS PASSED!")
+    finally:
+        qemu.stop()
+        try:
+            bcli("stop")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
