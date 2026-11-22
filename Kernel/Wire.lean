@@ -35,6 +35,7 @@ inductive Op where
   | pushOverride   -- 0x05: load Override PSBT onto OLED for review (requires unlocked + wallet)
   | pollResult     -- 0x07: read the last signed PSBT, if its holder signed (requires unlocked)
   | injectKey      -- 0x10: a key event from the host (0=prev,1=next,2=select,3=back); regtest builds only
+  | lab            -- 0x20: hardware bring-up: read and write device registers from the host; regtest builds only
   | respOk         -- 0x80: success reply payload
   | respErr        -- 0x81: UTF-8 error message
   deriving BEq, DecidableEq, Repr, Inhabited
@@ -47,6 +48,7 @@ def Op.toByte : Op → UInt8
   | .pushOverride   => 0x05
   | .pollResult     => 0x07
   | .injectKey      => 0x10
+  | .lab            => 0x20
   | .respOk         => 0x80
   | .respErr        => 0x81
 
@@ -58,6 +60,7 @@ def Op.ofByte? : UInt8 → Option Op
   | 0x05 => some .pushOverride
   | 0x07 => some .pollResult
   | 0x10 => some .injectKey
+  | 0x20 => some .lab
   | 0x80 => some .respOk
   | 0x81 => some .respErr
   | _    => none
@@ -72,6 +75,12 @@ def Op.isPush : Op → Bool
   | .pushDescriptor | .pushOverride => true
   | _ => false
 
+/-- Operations that exist for tests and for bringing hardware up, and are refused outside a regtest build:
+the host pressing the buttons, and the host reading and writing device registers. -/
+def Op.isTestOnly : Op → Bool
+  | .injectKey | .lab => true
+  | _ => false
+
 /-- Whether an operation is allowed in the current security state.
 
 - `unlocked`: the vault is open.
@@ -82,7 +91,7 @@ def Op.isPush : Op → Bool
 def Op.allowed (op : Op) (unlocked : Bool) (reviewing : Bool) (testBuild : Bool) : Bool :=
   if op.requiresUnlocked && !unlocked then false
   else if op.isPush && reviewing then false
-  else if op == .injectKey && !testBuild then false
+  else if op.isTestOnly && !testBuild then false
   else true
 
 structure Frame where

@@ -179,6 +179,12 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[2], "select") == 0) payload[0] = 2;
         else if (strcmp(argv[2], "back") == 0) payload[0] = 3;
         else { fprintf(stderr, "bad key: %s\n", argv[2]); free(payload); return 2; }
+    } else if (strcmp(argv[1], "lab") == 0 && argc >= 3) {
+        /* Hardware bring-up (regtest builds only): the payload as hex, the reply printed as hex. */
+        op = 0x20;
+        size_t n = strlen(argv[2]) / 2;
+        payload = malloc(n ? n : 1); plen = n;
+        for (size_t i = 0; i < n; i++) { unsigned v = 0; sscanf(argv[2] + 2 * i, "%2x", &v); payload[i] = (uint8_t)v; }
     } else if (strcmp(argv[1], "push-descriptor") == 0 && argc >= 3) {
         op = 0x04; payload = read_file_all(argv[2], &plen); if (!payload) return 2;
     } else if (strcmp(argv[1], "push-override") == 0 && argc >= 3) {
@@ -241,6 +247,11 @@ int main(int argc, char ** argv) {
         (*dev)->USBDeviceClose(dev); (*dev)->Release(dev);
         return 1;
     }
+    if (op == 0x20) {
+        printf("%s:", (rop == 0x80) ? "OK" : "ERR");
+        for (uint16_t i = 0; i < rlen; i++) printf("%02x", rx[8 + i]);
+        printf("\n");
+    } else
     printf("%s: %.*s\n", (rop == 0x80) ? "OK" : "ERR", (int)rlen, (char *)(rx + 8));
     (*iface)->USBInterfaceClose(iface);
     (*iface)->Release(iface);

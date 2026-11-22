@@ -12,6 +12,7 @@ import Kernel.Qemu.Ramfb
 import Kernel.Qemu.VirtioMmio
 import Kernel.Komodo
 import Kernel.Dwc3
+import Kernel.KomodoTouch
 import Tricorder.BuildConfig
 import Tricorder.Network
 import Tricorder.Crypto.Bip39Ascii
@@ -53,6 +54,7 @@ structure BareState where
   uart : Pl011.Uart := {}
   hasPl011 : Bool := false
   dwc3? : Option Dwc3.Device := none
+  touch? : Option KomodoTouch.Device := none
   deconFlushBase? : Option UInt64 := none
   gpioKeysBase? : Option UInt64 := none
   komodo : Komodo.KomodoHw := {}
@@ -301,6 +303,25 @@ private def handleKey (st : BareState) (k : GpioKeys.KeyEvent) : BaseIO BareStat
   | .back =>
     dispatch st .appPaused
 
+/-- Whether a control takes the physical buttons, so that a tap on the glass cannot press it. -/
+private def needsButtons : ButtonId → Bool
+  -- TODO(human): decide which controls a tap on the glass must never press. Arming and signing are the
+  -- floor; say whether anything else belongs here (see the list of `ButtonId` in `Tricorder/Ui/Layout.lean`).
+  | .armSign | .confirmSign => true
+  | _ => false
+
+/-- A tap on the glass, as a place on the 540 by 1200 picture. It does what pressing the control under it
+would do, with one exception: arming a payment and signing it take the buttons. A stray touch on the glass
+must not be able to sign, and the buttons are debounced and latched for exactly that
+(`Kernel.GpioKeysProofs`). -/
+private def handleTap (st : BareState) (x y : Nat) : BaseIO BareState := do
+  match hitTest st.cmds x y with
+  | none => return st
+  | some btn =>
+    if needsButtons btn then
+      return rebuildView { st with model := { st.model with statusMsg := "USE THE BUTTONS FOR THIS", isError := false } } false
+    else dispatch st (.tapButton btn)
+
 /-- Handles one CRC-32-verified `Kernel.Wire.Frame`, enforcing proved `Op.allowed` security gating. -/
 private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareState × Wire.Frame) := do
   let unlocked := st.model.secrets.isSome
@@ -368,6 +389,58 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
       let st' ← handleKey st k
       let tag := screenTag st'.model.screen
       return (st', { op := .respOk, payload := s!"{tag}|{st'.focusIdx}|{st'.model.statusMsg}".toUTF8 })
+  | .lab => do
+    -- Hardware bring-up, regtest builds only (`Kernel.WireProofs.only_test_builds_touch_registers`).
+    -- The payload is a run of steps, done in order:
+    --   'r' addr:u64        read a 32-bit register; its value is appended to the reply
+    --   'w' addr:u64 v:u32  write one
+    --   'd' micros:u32      wait
+    --   'f' off:u32 n:u16   n bytes of the device tree the bootloader handed over (its size, if n = 0)
+    --   'W'                 the register windows this image may touch: base:u64 size:u64 each
+    -- A register outside every window ends the run: the reply is what was read so far, as an error.
+    let wins ← Hw.windows
+    let p := f.payload
+    let u64At (o : Nat) : UInt64 := (List.range 8).foldl (fun acc k => acc ||| ((p.get! (o + k)).toUInt64 <<< (8 * k).toUInt64)) 0
+    let u32At (o : Nat) : UInt32 := (List.range 4).foldl (fun acc k => acc ||| ((p.get! (o + k)).toUInt32 <<< (8 * k).toUInt32)) 0
+    let push32 (b : ByteArray) (v : UInt32) : ByteArray := (List.range 4).foldl (fun acc k => acc.push (v >>> (8 * k).toUInt32).toUInt8) b
+    let push64 (b : ByteArray) (v : UInt64) : ByteArray := (List.range 8).foldl (fun acc k => acc.push (v >>> (8 * k).toUInt64).toUInt8) b
+    let mut out := ByteArray.empty
+    let mut i := 0
+    let mut bad : Option String := none
+    while i < p.size && bad.isNone do
+      let tag := p.get! i
+      if tag == 0x72 && i + 9 ≤ p.size then           -- 'r'
+        let a := u64At (i + 1)
+        if hasWindow wins a 4 && a % 4 == 0 then out := push32 out (← Hw.read32 a) else bad := some s!"NO_WINDOW {a}"
+        i := i + 9
+      else if tag == 0x77 && i + 13 ≤ p.size then     -- 'w'
+        let a := u64At (i + 1)
+        if hasWindow wins a 4 && a % 4 == 0 then Hw.write32 a (u32At (i + 9)) else bad := some s!"NO_WINDOW {a}"
+        i := i + 13
+      else if tag == 0x64 && i + 5 ≤ p.size then      -- 'd'
+        let ticksToWait := (u32At (i + 1)).toUInt64 * 25
+        let t0 ← Hw.ticks
+        let mut now ← Hw.ticks
+        while now - t0 < ticksToWait do
+          Hw.pause
+          now ← Hw.ticks
+        i := i + 5
+      else if tag == 0x66 && i + 7 ≤ p.size then      -- 'f'
+        let fdt ← Hw.fdtBytes
+        let off := (u32At (i + 1)).toNat
+        let n := (p.get! (i + 5)).toNat ||| ((p.get! (i + 6)).toNat <<< 8)
+        if n == 0 then out := push32 out fdt.size.toUInt32
+        else out := out ++ fdt.extract off (min fdt.size (off + min n 3900))
+        i := i + 7
+      else if tag == 0x57 then                        -- 'W'
+        for w in wins do
+          out := push64 (push64 out w.base) w.size
+        i := i + 1
+      else
+        bad := some "BAD_LAB_STEP"
+    match bad with
+    | some why => return (st, { op := .respErr, payload := why.toUTF8 ++ out })
+    | none => return (st, { op := .respOk, payload := out })
   | _ =>
     return (st, { op := .respErr, payload := "UNSUPPORTED_OP".toUTF8 })
 
@@ -454,12 +527,26 @@ def bareMain : IO UInt32 := do
     else
       pure (none, none)
 
+  -- 4c. The touchscreen, on the Pixel. Without it the buttons work as before, and the screen says why.
+  let (touch?, touchStatus?) ←
+    if !hasPl011 && KomodoTouch.windows.all (fun (base, size) => hasWindow wins base size) then
+      match ← KomodoTouch.init with
+      | .ok dev =>
+        log s!"tricorder-os: touchscreen online ({dev.maxX + 1} x {dev.maxY + 1} units)"
+        pure (some dev, none)
+      | .error err =>
+        log s!"tricorder-os: no touchscreen: {err}"
+        pure (none, some err)
+    else
+      pure (none, none)
+
   let initModel0 := Model.initial net hasVault attempts
-  let initModel := match usbStatus? with
-    | some msg => { initModel0 with statusMsg := msg }
-    | none => initModel0
+  let initModel := match touchStatus?, usbStatus? with
+    | some msg, _ => { initModel0 with statusMsg := msg }
+    | none, some msg => { initModel0 with statusMsg := msg }
+    | none, none => initModel0
   let mut st : BareState := rebuildView {
-    model := initModel, disk, blk?, vrng?, hasPl011, dwc3?, deconFlushBase?, gpioKeysBase?, komodo
+    model := initModel, disk, blk?, vrng?, hasPl011, dwc3?, touch?, deconFlushBase?, gpioKeysBase?, komodo
   } true
   st ← renderIfDirty st
   log "TRICORDER_READY"
@@ -586,6 +673,14 @@ def bareMain : IO UInt32 := do
           hbPhase := !hbPhase
           let row := if shownClkGated then hbRowAmber else if hbPhase then hbRowGreen else hbRowCyan
           paintDot row
+      -- The touchscreen: at most one message a turn of the loop, and at most one tap from it.
+      if let some t := st.touch? then
+        let (t', tap?) ← t.poll 540 1200
+        st := { st with touch? := some t' }
+        if let some (x, y) := tap? then
+          lastActivity ← Hw.ticks
+          st ← handleTap st x y
+          st ← renderIfDirty st
       -- Left alone while unlocked, the signer locks: its secrets are wiped as `appPaused` wipes them.
       if st.model.secrets.isSome then
         let idleNow ← Hw.ticks

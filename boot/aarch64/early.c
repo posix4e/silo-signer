@@ -927,6 +927,19 @@ void early_boot(uint64_t fdt_phys, uint64_t initial_el) {
         add_window(KOMODO_USB_BLKCON,    0x1000ULL);  /* usbdrd_phy0 blkcon (FORCE_BVALID/VBUSVALID) */
         add_window(KOMODO_USB_EUSBCON,   0x1000ULL);  /* usbdrd_phy0 eusbcon (VBUS_VALID_EXT) */
         add_window(KOMODO_DWC3,          0x10000ULL); /* synopsys,dwc3 */
+        /* Touchscreen bring-up (branch touch-bringup): the SPI controller the panel's touch IC hangs off,
+         * what switches that block to SPI and clocks it, and the two pin banks that hold its reset and
+         * interrupt lines. From zumapro-usi.dtsi, zuma-usb.dtsi, zumapro.dtsi and pinctrl-gs.c. */
+        add_window(0x111D0000ULL, 0x1000ULL);   /* spi_20 (USI2_HSI0) */
+        add_window(0x11021000ULL, 0x1000ULL);   /* sysreg_hsi0: USI SW_CONF at +0x01C */
+        add_window(0x11000000ULL, 0x8000ULL);   /* cmu_hsi0: the block's clock muxes, dividers and gates */
+        add_window(0x10840000ULL, 0x1000ULL);   /* pinctrl_11 (GPIO_PERIC0): gpp1-1 = touch reset */
+        add_window(0x15060000ULL, 0x1000ULL);   /* pinctrl_1 (GPIO_CUSTOM_ALIVE): gpn0-0 = touch interrupt */
+        /* The touch IC's two supplies are LDOs of the main PMIC, which only the power-management
+         * firmware can reach: requests go through its mailbox and the queues in its shared memory
+         * (acpm_ipc in zumapro.dtsi). */
+        add_window(0x15110000ULL, 0x1000ULL);   /* AP-to-APM mailbox */
+        add_window(0x15700000ULL, 0x58000ULL);  /* APM shared memory, as the AP sees it */
         /* Discover ABL's live active OLED framebuffer directly from DPU_DMA L0..L13 registers! */
         komodo_probe_live_fb();
     }

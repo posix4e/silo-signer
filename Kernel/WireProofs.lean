@@ -35,8 +35,12 @@ theorem reviewing_blocks_push (op : Op) (unlocked testBuild : Bool)
 /-- Outside a regtest build, host key injection (`injectKey`) is refused, whatever else is true. -/
 theorem only_test_builds_inject_keys (unlocked reviewing : Bool) :
     Op.injectKey.allowed unlocked reviewing false = false := by
-  have heq : (Op.injectKey == Op.injectKey) = true := by decide
-  simp [Op.allowed, Op.requiresUnlocked, Op.isPush, heq]
+  simp [Op.allowed, Op.requiresUnlocked, Op.isPush, Op.isTestOnly]
+
+/-- Outside a regtest build the host can neither read nor write a device register (`lab`). -/
+theorem only_test_builds_touch_registers (unlocked reviewing : Bool) :
+    Op.lab.allowed unlocked reviewing false = false := by
+  simp [Op.allowed, Op.requiresUnlocked, Op.isPush, Op.isTestOnly]
 
 /-- Any frame shorter than 12 bytes (8-byte header + 4-byte CRC-32) is rejected. -/
 theorem decode_rejects_short (raw : ByteArray) (h : raw.size < headerSize + trailerSize) :
