@@ -153,6 +153,25 @@ build/tricorder-usb push-override payment.psbt  # a payment, for its holder to r
 build/tricorder-usb poll                        # the signed payment, once it is signed
 ```
 
+**A cable that is pulled does not come back.** The signer goes on running, and its buttons and screen work,
+but the host does not see it again until the phone is restarted, and a restart loses the key. So plug the
+cable in before entering the words, and leave it in. Seen on the Pixel on 2026-11-23, with the panel lit and
+with it dark, in regtest and mainnet images:
+
+- The USB controller is not what fails. A regtest image keeps a record of the controller's link
+  (`Kernel/UsbLink.lean`, shown in its status line and printed by `tools/bench/lab_usb.py`): with the cable
+  in and silent for a minute the link stays on; after the cable is pulled and put back it reads suspended and
+  still configured, and no reset from the host ever arrives.
+- Having the signer take itself off the bus and put itself back, every three seconds for seven minutes, with
+  and without waking the USB PHY again, did not bring the host back. That change was taken out again.
+- What is between the controller and the connector is set up by the bootloader and has no driver here: the
+  plug-detection chip (`max77759tcpc`, I2C address `0x25` on the bus at `0x108C0000`) and the USB 2 repeater
+  (`samsung,eusb-repeater`, `0x3E` on the bus at `0x10C90000`, supplied by `S2MPG14_LDO19`), from the device
+  tree the bootloader hands over. Neither bus is in the register windows the signer maps. Which of the two
+  stops the host seeing the signer is not known.
+- Once, a mainnet image came back onto USB by itself some minutes after a replug. Why is not known, and it
+  did not happen again in two later tries of seven and ten minutes.
+
 The live demo page in [silo-site](https://github.com/posix4e/silo-site) speaks the same frames from the browser
 over WebUSB. Its test runs `regtest-cli` as the override key of the wallet silo's `scripts/live-signer start`
 makes, of both kinds. The page has been run against a stand-in for the device, not against the Pixel.
