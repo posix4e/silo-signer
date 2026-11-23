@@ -1,0 +1,30 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  # The proofs, and the signer as an ordinary process. The image for the Pixel and the run under QEMU against
+  # Bitcoin Core (scripts/qemu-regtest-e2e) need a cross toolchain, QEMU and bitcoind, and are run by hand.
+  test:
+    runs-on: ${{ vars.SILO_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      # Builds everything, the proof gate included: the build fails if a gated theorem has an unproved step
+      # or an axiom beyond Lean's three.
+      - run: lake build
+      - name: The allocator, run as its language defines it
+        run: .lake/build/bin/mini-test
+      - name: Keys, the vault, the review of a payment and its signature
+        run: .lake/build/bin/signer-test
+      - name: Every screen, by its buttons, from first run to a signed payment
+        run: TRICORDER_DATA_DIR="$(mktemp -d)" .lake/build/bin/journey-test
+      - name: The boot image and its signature
+        run: .lake/build/bin/boot-img-test

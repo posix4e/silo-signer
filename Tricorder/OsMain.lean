@@ -31,7 +31,7 @@ Zero Linux, zero Android, zero filesystems:
 - Verifies FDT (`Kernel.Fdt.parse`) & hardware RNG (`Kernel.Rng`, fail-closed)
 - Mounts zero-filesystem 2-slot raw block persistence (`Kernel.VaultStore`) over `VirtioBlk` (QEMU)
   or polled Exynos UFS (`Komodo`)
-- Renders Star Trek LCARS + focus ring (`Ui.Layout.withFocusRing`) onto hardware framebuffer
+- Renders the screens and the focus ring (`Ui.Layout.withFocusRing`) onto hardware framebuffer
   (`Ramfb` in QEMU / ABL `cont_splash` + DECON on Pixel 9 Pro XL)
 - Driven by physical buttons (Volume Up / Volume Down / Power via verified `Kernel.GpioKeys`) and
   zero-filesystem `Kernel.Wire` frames over PL011 UART (QEMU) or USB-C DWC3 bulk (Pixel). -/
@@ -63,8 +63,19 @@ structure BareState where
 private def hasWindow (wins : Array Hw.Window) (addr len : UInt64) : Bool :=
   wins.any fun w => addr ≥ w.base && w.size ≥ len && addr - w.base ≤ w.size - len
 
-private def isMainnet (m : Model) : Bool :=
-  m.network == .mainnet
+/-- Whether the host may press the buttons: only in an image built for regtest, which the tests under
+emulation drive. On signet and mainnet a person presses them (`Kernel.WireProofs.only_test_builds_inject_keys`). -/
+private def isTestBuild (m : Model) : Bool :=
+  m.network == .regtest
+
+/-- Whether a wallet or a payment is on the screen, waiting for its holder's answer. -/
+private def isReviewing (m : Model) : Bool :=
+  match m.screen with
+  | .reviewTx .. | .reviewDescriptor .. => true
+  | _ => false
+
+/-- An unlocked signer left alone locks itself: about five minutes on the Pixel's 24.576 MHz counter. -/
+private def idleLockTicks : UInt64 := 7500000000
 
 /-- Health-checked hardware entropy: prefers AArch64 `RNDRRS`/`RNDR`, mixes/falls back to `virtio-rng`. -/
 private def hardwareRandom (st : BareState) (count : Nat) : BaseIO (Except String (BareState × ByteArray)) := do
@@ -95,7 +106,8 @@ private def hardwareRandom (st : BareState) (count : Nat) : BaseIO (Except Strin
     return .error "NO HARDWARE RNG AVAILABLE"
 
 /-- Atomically commits updated `(failedAttempts, vault?, desc?)` to the inactive raw 4 KiB flash slot. -/
-private def persistSlot (st : BareState) (attempts : Nat) (vault? desc? : Option ByteArray) : BaseIO BareState := do
+private def persistSlotChecked (st : BareState) (attempts : Nat) (vault? desc? : Option ByteArray) :
+    BaseIO (BareState × Bool) := do
   let (targetIdx, nextSeq) := VaultStore.planWrite st.disk
   let blkBytes := VaultStore.encodeSlot { seq := nextSeq, failedAttempts := attempts, vault?, descriptor? := desc? }
   let disk' := st.disk.set targetIdx blkBytes
@@ -103,11 +115,15 @@ private def persistSlot (st : BareState) (attempts : Nat) (vault? desc? : Option
   match st.blk? with
   | some blk =>
     match ← blk.writeBlock4K slotNum blkBytes with
-    | some blk' => return { st with disk := disk', blk? := some blk' }
+    | some blk' => return ({ st with disk := disk', blk? := some blk' }, true)
     | none =>
       log "os: WARN virtio-blk write failed"
-      return { st with disk := disk' }
-  | none => return { st with disk := disk' }
+      return ({ st with disk := disk' }, false)
+  -- With no disk the slots are in memory only, and the write is the assignment.
+  | none => return ({ st with disk := disk' }, true)
+
+private def persistSlot (st : BareState) (attempts : Nat) (vault? desc? : Option ByteArray) : BaseIO BareState :=
+  return (← persistSlotChecked st attempts vault? desc?).1
 
 /-- Zeroes BOTH raw 4 KiB slots on disk and in memory. -/
 private def wipeStorage (st : BareState) : BaseIO BareState := do
@@ -161,7 +177,12 @@ private def performEffect (st : BareState) (eff : Effect) : BaseIO (BareState ×
   | .unlockVault pin =>
     let some blob := currentVault? st
       | return (st, .hostStatus "VAULT SLOT EMPTY" true)
-    let prevAttempts := currentAttempts st
+    -- The attempt is counted where it will survive a power cut before the PIN is tried, and if it cannot
+    -- be counted the PIN is not tried: pulling the power must not buy a free guess.
+    let nextAttempts := currentAttempts st + 1
+    let (st, counted) ← persistSlotChecked st nextAttempts (some blob) (currentDesc? st)
+    unless counted do
+      return (st, .hostStatus "STORAGE FAILED - PIN NOT TRIED" true)
     match Vault.openVault st.model.network pin blob with
     | .ok words =>
       match Identity.ofWords words st.model.network.toBitcoin with
@@ -175,13 +196,11 @@ private def performEffect (st : BareState) (eff : Effect) : BaseIO (BareState ×
           | some db => (String.fromUTF8? db).bind fun txt => (registerDescriptor id txt).toOption
         return (st', .hostUnlockOk words id wallet?)
     | .error _ =>
-      let nextAttempts := prevAttempts + 1
       if nextAttempts ≥ Vault.maxFailedAttempts then
         let st' ← wipeStorage st
         return (st', .hostUnlockFailed nextAttempts true)
       else
-        let st' ← persistSlot st nextAttempts (some blob) (currentDesc? st)
-        return (st', .hostUnlockFailed nextAttempts false)
+        return (st, .hostUnlockFailed nextAttempts false)
   | .wipeVault =>
     let st' ← wipeStorage st
     return ({ st' with lastSigned? := none }, .hostStatus "VAULT WIPED" true)
@@ -285,8 +304,10 @@ private def handleKey (st : BareState) (k : GpioKeys.KeyEvent) : BaseIO BareStat
 /-- Handles one CRC-32-verified `Kernel.Wire.Frame`, enforcing proved `Op.allowed` security gating. -/
 private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareState × Wire.Frame) := do
   let unlocked := st.model.secrets.isSome
-  if !f.op.allowed unlocked (isMainnet st.model) then
-    return (st, { op := .respErr, payload := "DENIED_BY_SECURITY_POLICY".toUTF8 })
+  let reviewing := isReviewing st.model
+  if !f.op.allowed unlocked reviewing (isTestBuild st.model) then
+    let why := if unlocked && reviewing && f.op.isPush then "BUSY_REVIEWING" else "DENIED_BY_SECURITY_POLICY"
+    return (st, { op := .respErr, payload := why.toUTF8 })
   match f.op with
   | .ping =>
     return (st, { op := .respOk, payload := s!"TRICORDER-BARE-V1:{st.model.network.name}".toUTF8 })
@@ -326,19 +347,8 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
         match reviewOverride id w psbt "wire/override.psbt" with
         | .error err => return (st, { op := .respErr, payload := err.toUTF8 })
         | .ok rev =>
-          let st' ← dispatch st (.hostTxReviewed rev)
-          return (st', { op := .respOk, payload := rev.txidDisplay.toUTF8 })
-  | .pushApprove =>
-    match st.model.secrets with
-    | none => return (st, { op := .respErr, payload := "LOCKED".toUTF8 })
-    | some (id, _) =>
-      match parsePsbtBytes f.payload with
-      | .error err => return (st, { op := .respErr, payload := err.toUTF8 })
-      | .ok psbt =>
-        match reviewApprover id st.model.wallet psbt "wire/approve.psbt" with
-        | .error err => return (st, { op := .respErr, payload := err.toUTF8 })
-        | .ok rev =>
-          let st' ← dispatch st (.hostTxReviewed rev)
+          -- What was signed before is not this payment: `pollResult` answers nothing until this one is signed.
+          let st' ← dispatch { st with lastSigned? := none } (.hostTxReviewed rev)
           return (st', { op := .respOk, payload := rev.txidDisplay.toUTF8 })
   | .pollResult =>
     match st.lastSigned? with
@@ -483,6 +493,7 @@ def bareMain : IO UInt32 := do
   let mut lastShownEv : Nat := 0
   let mut shownClkGated : Bool := false
   let mut powerHoldTicks : Nat := 0
+  let mut lastActivity ← Hw.ticks
   while running do
     -- Poll serial / Wire transport on PL011 (QEMU) when announced
     let uartRes ← if st.hasPl011 then st.uart.pollInputOrWire else pure none
@@ -496,11 +507,13 @@ def bareMain : IO UInt32 := do
         | 0x1b | 0x71 => some .back   -- Esc / 'q'
         | _ => none
       if let some k := key? then
+        lastActivity ← Hw.ticks
         st ← handleKey st k
         st ← renderIfDirty st
     | some (.inr (.error err)) =>
       st.uart.sendFrame { op := .respErr, payload := err.toUTF8 }
     | some (.inr (.ok frame)) =>
+      if frame.op == .injectKey then lastActivity ← Hw.ticks
       let (st', reply) ← handleWireFrame st frame
       st ← renderIfDirty st'
       st.uart.sendFrame reply
@@ -533,6 +546,7 @@ def bareMain : IO UInt32 := do
           let usb'' ← usb'.sendFrame { op := .respErr, payload := err.toUTF8 }
           st := { st with dwc3? := some usb'' }
         | some (.ok frame) =>
+          if frame.op == .injectKey then lastActivity ← Hw.ticks
           let (st', reply) ← handleWireFrame st frame
           st ← renderIfDirty st'
           if let some u := st.dwc3? then
@@ -560,6 +574,7 @@ def bareMain : IO UInt32 := do
           let (keys', ev?) := st.keys.poll { volUp := u, volDown := d, power := p }
           st := { st with keys := keys' }
           if let some k := ev? then
+            lastActivity := now
             paintDot hbRowMagenta
             st ← handleKey st k
             paintDot hbRowYellow
@@ -571,6 +586,13 @@ def bareMain : IO UInt32 := do
           hbPhase := !hbPhase
           let row := if shownClkGated then hbRowAmber else if hbPhase then hbRowGreen else hbRowCyan
           paintDot row
+      -- Left alone while unlocked, the signer locks: its secrets are wiped as `appPaused` wipes them.
+      if st.model.secrets.isSome then
+        let idleNow ← Hw.ticks
+        if idleNow - lastActivity ≥ idleLockTicks then
+          lastActivity := idleNow
+          st ← dispatch st .appPaused
+          st ← renderIfDirty st
       Hw.pause
   return 0
 

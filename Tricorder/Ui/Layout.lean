@@ -27,7 +27,14 @@ def disjoint (a b : Rect) : Bool :=
 
 end Rect
 
-/-- All interactive LCARS buttons across every Tricorder screen. -/
+/-- `text` cut into at most `lines` lines of `cols` characters, in order. Nothing is lost when the text is
+no longer than `cols * lines` (`Tricorder.Proofs.wrapChars_complete`): that is what lets a screen claim to
+show an address whole. -/
+def wrapChars (cols : Nat) : Nat → List Char → List (List Char)
+  | 0, _ => []
+  | lines + 1, text => if text.isEmpty then [] else text.take cols :: wrapChars cols lines (text.drop cols)
+
+/-- All interactive buttons across every screen. -/
 inductive ButtonId where
   | pinDigit (d : Nat)
   | pinBackspace
@@ -54,6 +61,8 @@ inductive ButtonId where
   | openInboxItem (idx : Nat)
   | registerWallet
   | abortReview
+  | reviewPrevPage
+  | reviewNextPage
   | armSign
   | confirmSign
   | runSelfTest

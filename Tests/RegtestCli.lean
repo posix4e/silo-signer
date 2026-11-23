@@ -10,7 +10,7 @@ import Tricorder.Signer.Sign
 
 Exercises the exact same `Tricorder.Signer` code compiled on the minimal runtime against real
 `bitcoind` wallets for both Taproot (`tr(..., sortedmulti_a(2, ...))`) and SegWit v0
-(`wsh(sortedmulti(2, ...))`) 2-of-3 co-signing plus Silo `silo/approve` verification. -/
+(`wsh(sortedmulti(2, ...))`) 2-of-3 co-signing. -/
 
 open Tricorder Tricorder.Signer Winnow Winnow.Keys
 
@@ -29,7 +29,6 @@ def main (args : List String) : IO UInt32 := do
     | .error e => println s!"error: {e}"; return 1
     | .ok id =>
       println id.overrideKeyExpression
-      println id.approverPubKeyHex
       println id.fingerprintHex
       return 0
   | ["addr0", netStr, seedHex, desc] =>
@@ -49,17 +48,6 @@ def main (args : List String) : IO UInt32 := do
     match res with
     | .error e => println s!"error: {e}"; return 1
     | .ok signed => println signed.payloadText; return 0
-  | ["sign-approve", netStr, seedHex, psbtB64] =>
-    let some net := Network.parse? netStr | do println "error: bad network"; return 2
-    let fresh ← Platform.random 32
-    let res : Except String SignedResult := do
-      let id ← loadIdentity seedHex net
-      let psbt ← parsePsbtBytes psbtB64.toUTF8
-      let rev ← reviewApprover id none psbt "approve.psbt"
-      signReviewed id rev fresh
-    match res with
-    | .error e => println s!"error: {e}"; return 1
-    | .ok signed => println signed.payloadText; return 0
   | _ =>
-    println "usage: regtest-cli keys|addr0|sign-override|sign-approve ..."
+    println "usage: regtest-cli keys|addr0|sign-override ..."
     return 2

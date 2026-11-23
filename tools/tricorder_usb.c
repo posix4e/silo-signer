@@ -11,7 +11,6 @@ Usage:
   build/tricorder-usb keys
   build/tricorder-usb push-descriptor <file>
   build/tricorder-usb push-override <psbt-file>
-  build/tricorder-usb push-approve <psbt-file>
   build/tricorder-usb poll
 */
 #include <CoreFoundation/CoreFoundation.h>
@@ -158,7 +157,7 @@ static IOUSBInterfaceInterface182 ** open_tricorder_iface(IOUSBDeviceInterface *
 
 int main(int argc, char ** argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <ping|status|keys|push-descriptor|push-override|push-approve|poll|key> [arg]\n"
+        fprintf(stderr, "usage: %s <ping|status|keys|push-descriptor|push-override|poll|key> [arg]\n"
                         "  (note: `key <prev|next|select|back>` is non-mainnet test-only; proved rejected on mainnet)\n",
                 argv[0]);
         return 2;
@@ -184,8 +183,6 @@ int main(int argc, char ** argv) {
         op = 0x04; payload = read_file_all(argv[2], &plen); if (!payload) return 2;
     } else if (strcmp(argv[1], "push-override") == 0 && argc >= 3) {
         op = 0x05; payload = read_file_all(argv[2], &plen); if (!payload) return 2;
-    } else if (strcmp(argv[1], "push-approve") == 0 && argc >= 3) {
-        op = 0x06; payload = read_file_all(argv[2], &plen); if (!payload) return 2;
     } else {
         fprintf(stderr, "unknown command: %s\n", argv[1]);
         return 2;

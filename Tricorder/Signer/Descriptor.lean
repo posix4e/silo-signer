@@ -80,7 +80,7 @@ def registerTaproot (i : Identity) (text : String) : Except String RegisteredWal
     | .error e => throw s!"invalid Taproot descriptor ({e.name})"
   if account.signersLeaves.isEmpty then throw "descriptor has no immediate-spend leaf"
   unless account.signersLeaves.any (·.keys.any (isOurKey i)) do
-    throw "descriptor does not contain this Tricorder's Override key"
+    throw "descriptor does not contain this signer's override key"
   unless account.signersLeaves.all (fun leaf => leaf.threshold.toNat ≥ 2 && distinctTaproot leaf.keys) do
     throw "descriptor allows single-key spend or repeats a key"
   let first ← match account.address 0 0 with
@@ -99,7 +99,7 @@ def registerTaproot (i : Identity) (text : String) : Except String RegisteredWal
 def registerSegwit (i : Identity) (text : String) : Except String RegisteredWallet := do
   let account ← parseSegwit text i.network
   unless account.keys.any (isOurKey i) do
-    throw "descriptor does not contain this Tricorder's Override key"
+    throw "descriptor does not contain this signer's override key"
   unless account.threshold ≥ 2 && SegwitMultisigAccount.allDifferent (account.keys.map SegwitMultisigAccount.identity) do
     throw "descriptor allows single-key spend or repeats a key"
   let first ← match SegwitMultisigAccount.resolved account 0 0 with

@@ -7,8 +7,9 @@ import Tricorder.Ui.View
 import Tricorder.Signer.Descriptor
 import Tricorder.Signer.Review
 import Tricorder.Signer.Sign
+import Tests.Fixture
 
-/-! # Headless Star Trek LCARS Tap-Journey Test & Screenshot Renderer
+/-! # Headless tap-journey test & Screenshot Renderer
 
 Runs the real `Tricorder.App` session on macOS (both Lean runtime and minimal runtime):
 1. Verifies `buttonsDisjoint` on every screen visited (proving no overlapping LCARS touch targets).
@@ -35,6 +36,14 @@ private def tapBtn (s : App.Session) (target : ButtonId) : IO App.Session := do
     throw (IO.userError s!"hitTest ({cx},{cy}) returned {repr hit}, expected {repr target}")
   App.dispatch s (.tapButton target)
 
+/-- Whether the screen shows `address` whole: its lines of text, one after another, contain it. -/
+private def wholeAddress (ses : App.Session) (address : String) : Bool :=
+  let texts := ses.cmds.filterMap fun cmd =>
+    match cmd with
+    | .text _ _ t _ _ => some t
+    | _ => none
+  ((String.join texts).splitOn address).length > 1
+
 private def saveShot (dir? : Option String) (name : String) (s : App.Session) : IO Unit := do
   if let some dir := dir? then
     let frame := renderCmds s.width s.height s.model.network.palette.bg s.cmds
@@ -56,7 +65,7 @@ def main (args : List String) : IO UInt32 := do
   let mut s ← App.startSession .signet 540 1200 64 44
   let checkDisjoint (label : String) (ses : App.Session) : IO Bool := do
     let d := buttonsDisjoint ses.cmds
-    check s!"LCARS buttons disjoint: {label}" d
+    check s!"buttons disjoint: {label}" d
     return d
 
   if !(← checkDisjoint "setupChoice" s) then failures := failures + 1
@@ -79,7 +88,7 @@ def main (args : List String) : IO UInt32 := do
   s ← tapBtn s .pinSubmit
 
   let unlockedOk := s.model.secrets.isSome && match s.model.screen with | .home => true | _ => false
-  check "vault sealed and unlocked onto LCARS Bridge home" unlockedOk
+  check "vault sealed and unlocked onto the home screen" unlockedOk
   if !unlockedOk then failures := failures + 1
   if !(← checkDisjoint "home" s) then failures := failures + 1
   saveShot shotDir? "04_home" s
@@ -89,7 +98,7 @@ def main (args : List String) : IO UInt32 := do
   if !(← checkDisjoint "keys tab 0" s) then failures := failures + 1
   saveShot shotDir? "05_keys_qr_override" s
   s ← tapBtn s (.keysTab 1)
-  saveShot shotDir? "06_keys_qr_approver" s
+  saveShot shotDir? "06_keys_qr_address" s
   s ← tapBtn s .exportKeys
   s ← tapBtn s .navHome
 
@@ -103,7 +112,7 @@ def main (args : List String) : IO UInt32 := do
   saveShot shotDir? "07_diagnostics" s
   s ← tapBtn s .navHome
 
-  -- 5. Drop a descriptor and an approver PSBT into inbox/, review & sign!
+  -- 5. Drop a descriptor and a payment of five outputs into inbox/, review every page and sign
   let some (idA, _) := s.model.secrets | do println "FAIL missing identity"; return 1
   let entB := ByteArray.mk ((Array.range 32).map (fun i => (i + 11).toUInt8))
   let entC := ByteArray.mk ((Array.range 32).map (fun i => (i + 77).toUInt8))
@@ -111,8 +120,9 @@ def main (args : List String) : IO UInt32 := do
   let .ok wC := Bip39Ascii.fromEntropy entC | return 1
   let .ok idB := Identity.ofWords wB .signet | return 1
   let .ok idC := Identity.ofWords wC .signet | return 1
-  let trDesc := s!"tr(50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0,sortedmulti_a(2,{idA.overrideKeyExpression}/<0;1>/*,{idB.overrideKeyExpression}/<0;1>/*,{idC.overrideKeyExpression}/<0;1>/*))"
-  Platform.writeFile "inbox/descriptor.txt" trDesc.toUTF8
+  let .ok (_, psbt, _) := Tests.Fixture.overridePayment idA idB idC 5 190000
+    | do println "FAIL no payment for the test"; return 1
+  Platform.writeFile "inbox/descriptor.txt" (Tests.Fixture.descriptor idA idB idC).toUTF8
 
   s ← tapBtn s .navInbox
   if !(← checkDisjoint "inbox" s) then failures := failures + 1
@@ -124,26 +134,35 @@ def main (args : List String) : IO UInt32 := do
   check "descriptor registered via UI review" regOk
   if !regOk then failures := failures + 1
 
-  -- Drop an approver PSBT into inbox/approve.b64
-  let some wal := s.model.wallet | return 1
-  let .ok dstScript := AddressDecoder.scriptPubKey wal.firstAddress .signet | return 1
-  let zero32 := ByteArray.mk (Array.replicate 32 0)
-  let tx : Transaction :=
-    { version := 2
-      inputs := #[{ previousOutput := ⟨zero32, 0⟩, scriptSig := .empty, sequence := 0xfffffffd }]
-      outputs := #[{ value := 170100, scriptPubKey := dstScript }]
-      locktime := 0 }
-  let .ok psbt := PSBT.ofV0 tx #[] #[{ pairs := #[] }] #[{ pairs := #[] }] | return 1
-  Platform.writeFile "inbox/approve.b64" psbt.base64.toUTF8
-
+  Platform.writeFile "inbox/payment.b64" psbt.base64.toUTF8
   s ← tapBtn s .navInbox
-  -- Find approve.b64 index
-  let approveIdx := match s.model.screen with
-    | .inbox entries => (entries.findIdx? (·.fileName == "approve.b64")).getD 0
+  let paymentIdx := match s.model.screen with
+    | .inbox entries => (entries.findIdx? (·.fileName == "payment.b64")).getD 0
     | _ => 0
-  s ← tapBtn s (.openInboxItem approveIdx)
-  if !(← checkDisjoint "reviewTx unarmed" s) then failures := failures + 1
+  s ← tapBtn s (.openInboxItem paymentIdx)
+  if !(← checkDisjoint "reviewTx page 1" s) then failures := failures + 1
   saveShot shotDir? "09_review_tx" s
+
+  -- The first page of two offers no arming, shows outputs 1 to 3 with their addresses whole, and the signer
+  -- cannot be armed from it even by an event the screen does not offer.
+  let outAddresses : Array String := match s.model.screen with
+    | .reviewTx tx _ => tx.outputs.map fun (o : ReviewedOutput) => o.address
+    | _ => #[]
+  let firstPageOk := outAddresses.size == 5 &&
+    (buttonsOf s.cmds).all (·.1 != .armSign) &&
+    (List.range 3).all (fun k => wholeAddress s outAddresses[k]!) && !wholeAddress s outAddresses[3]!
+  check "page 1 of 2 shows outputs 1 to 3 whole and offers no arming" firstPageOk
+  if !firstPageOk then failures := failures + 1
+  let forced ← App.dispatch s (.tapButton .armSign)
+  let notArmed := match forced.model.screen with | .reviewTx _ false => true | _ => false
+  check "the signer is not armed before the last page is reached" notArmed
+  if !notArmed then failures := failures + 1
+
+  s ← tapBtn s .reviewNextPage
+  if !(← checkDisjoint "reviewTx page 2" s) then failures := failures + 1
+  let lastPageOk := wholeAddress s outAddresses[3]! && wholeAddress s outAddresses[4]! && !wholeAddress s outAddresses[0]!
+  check "page 2 of 2 shows outputs 4 and 5 whole" lastPageOk
+  if !lastPageOk then failures := failures + 1
   s ← tapBtn s .armSign
   if !(← checkDisjoint "reviewTx armed" s) then failures := failures + 1
   saveShot shotDir? "10_review_tx_armed" s
@@ -152,9 +171,12 @@ def main (args : List String) : IO UInt32 := do
   saveShot shotDir? "11_signed_qr" s
 
   let signedOk := match s.model.screen with
-    | .signed res => verifyApprovalLine idA.approverPubKeyHex tx.txid res.payloadText
+    | .signed res =>
+      match PSBT.ofBase64 res.payloadText with
+      | .ok signed => (signed.inputs[0]?.map fun i => i.partialSignatures.size == 1).getD false
+      | .error _ => false
     | _ => false
-  check "two-step armed UI signing produced valid silo/approve signature" signedOk
+  check "reading both pages, arming and confirming signs the payment with the override key" signedOk
   if !signedOk then failures := failures + 1
 
   -- 6. Background pause wipes RAM secrets immediately!
@@ -185,7 +207,7 @@ def main (args : List String) : IO UInt32 := do
 
   -- Cleanup inbox/outbox
   Platform.deleteFile "inbox/descriptor.txt"
-  Platform.deleteFile "inbox/approve.b64"
+  Platform.deleteFile "inbox/payment.b64"
 
   if failures == 0 then
     println "journey-test: all checks passed"

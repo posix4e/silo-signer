@@ -4,15 +4,11 @@ import SecpCt.Schnorr
 import SecpCt.Keys
 import Tricorder.Crypto.Bip39Ascii
 
-/-! # Constant-time key derivation (`SecpCt`) for Override and Approver roles
+/-! # Constant-time key derivation (`SecpCt`) for the override key
 
-All secret-key arithmetic runs exclusively through `SecpCt` on machine words (never Lean `Nat`).
-From one 24-word BIP39 seed:
-- **Override Key** (BIP32 Taproot / SegWit multisig account): `m/86'/coin'/0'`
-- **Approver Key** (Silo `silo/approve` BIP340 x-only key):   `m/86'/coin'/1'/0/0`
-
-The two accounts use disjoint hardened indices (`0'` vs `1'`), so compromise of one child chain never
-derives the other. -/
+All secret-key arithmetic runs through `SecpCt` on machine words, never Lean `Nat`. From one 24-word BIP39
+seed the signer derives one account, the override key of a Taproot or SegWit v0 multisig wallet, at
+`m/86'/coin'/0'`. -/
 
 namespace Tricorder
 
@@ -77,7 +73,7 @@ def unhex? (text : String) : Option ByteArray := do
     | [_], _ => none
   go text.trimAscii.toString.toList ByteArray.empty
 
-/-- Unlocked signer identity holding both the Override account secret and the Approver key secret.
+/-- Unlocked signer identity holding the Override account secret.
 Dropped immediately when Tricorder locks or pauses (`Mini/Alloc` zeroes freed blocks). -/
 structure Identity where
   network : BitcoinNetwork
@@ -86,8 +82,6 @@ structure Identity where
   overrideAccount : HDKey
   /-- Secret extended key at `m/86'/coin'/0'`. -/
   overrideSecret : SecretKey
-  /-- Dedicated Silo Approver key at `m/86'/coin'/1'/0/0`. -/
-  approverSecret : SecretKey
 
 namespace Identity
 
@@ -99,13 +93,10 @@ def coinIndex (network : BitcoinNetwork) : UInt32 :=
 def overridePath (network : BitcoinNetwork) : Array UInt32 :=
   #[hardened 86, hardened (coinIndex network), hardened 0]
 
-def approverPath (network : BitcoinNetwork) : Array UInt32 :=
-  #[hardened 86, hardened (coinIndex network), hardened 1, 0, 0]
-
 def keyNetwork (network : BitcoinNetwork) : HDKey.Network :=
   if network == .mainnet then .mainnet else .testnet
 
-/-- Derives both Override and Approver keys from a BIP32 seed (64 bytes from BIP39, or 32 bytes in tests). -/
+/-- Derives the Override key from a BIP32 seed (64 bytes from BIP39, or 32 bytes in tests). -/
 def ofSeed (seed : ByteArray) (network : BitcoinNetwork) : Except String Identity := do
   unless seed.size ≥ 16 && seed.size ≤ 64 do throw "seed must be 16..64 bytes"
   let derived : Option Identity := do
@@ -120,10 +111,7 @@ def ofSeed (seed : ByteArray) (network : BitcoinNetwork) : Except String Identit
         chainCode := overrideSecret.chain
         privateKey := none
         publicKey := overrideSecret.publicKey }
-    let approverAcct ← coin.child (hardened 1)
-    let approverBranch ← approverAcct.child 0
-    let approverSecret ← approverBranch.child 0
-    return { network, fingerprint := root.fingerprint, overrideAccount, overrideSecret, approverSecret }
+    return { network, fingerprint := root.fingerprint, overrideAccount, overrideSecret }
   match derived with
   | some id => return id
   | none => throw "seed failed BIP32 key derivation"
@@ -135,10 +123,6 @@ def ofWords (words : Array String) (network : BitcoinNetwork) : Except String Id
 /-- Descriptor key expression for the Override key: `[fp/86h/coin h/0h]xpub...`. -/
 def overrideKeyExpression (i : Identity) : String :=
   s!"[{hex8 i.fingerprint}/86h/{coinIndex i.network}h/0h]{i.overrideAccount.serialized (keyNetwork i.network)}"
-
-/-- 32-byte x-only public key (hex) for registering Tricorder as a Silo Approver. -/
-def approverPubKeyHex (i : Identity) : String :=
-  hexBytes i.approverSecret.xonly
 
 def fingerprintHex (i : Identity) : String :=
   hex8 i.fingerprint

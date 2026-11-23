@@ -90,4 +90,20 @@ theorem focusedButton_is_member (cmds : List DrawCmd) (idx : Nat) (id : ButtonId
     obtain ⟨⟨bid, r⟩, hget, rfl⟩ := h
     exact ⟨r, List.mem_of_getElem? hget⟩
 
+/-- A text no longer than the lines it is given is shown whole: the lines, joined, are the text. The review
+screen gives an address three lines of 30, and no address is longer than 90 characters. -/
+theorem wrapChars_complete (cols : Nat) : ∀ (lines : Nat) (text : List Char),
+    text.length ≤ cols * lines → (wrapChars cols lines text).flatten = text
+  | 0, text, h => by
+    have : text = [] := List.length_eq_zero_iff.mp (by simpa using h)
+    simp [wrapChars, this]
+  | lines + 1, text, h => by
+    unfold wrapChars
+    by_cases hempty : text.isEmpty
+    · simp [hempty, List.isEmpty_iff.mp hempty]
+    · have hrest : (text.drop cols).length ≤ cols * lines := by
+        rw [List.length_drop, Nat.mul_succ] at *
+        omega
+      simp [hempty, wrapChars_complete cols lines _ hrest]
+
 end Tricorder.Proofs

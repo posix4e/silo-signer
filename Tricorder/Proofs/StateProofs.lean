@@ -143,4 +143,20 @@ theorem tap_preserves_safe (m : Model) (btn : ButtonId) (hsafe : Safe m) :
     cases btn <;> cases hsec : m.secrets <;> simp only [update, updateTap, hs, hsec, lockModel, Screen.isLockedOrSetup] at hlock ⊢
     all_goals first | rfl | contradiction
 
+/-- The signer is armed only from the last page of a payment's outputs: whoever arms it has been shown
+every page, since the pages are reached one at a time from the first. -/
+theorem arming_requires_last_page (m : Model) (btn : ButtonId) (tx : ReviewedTx)
+    (hbefore : m.screen = .reviewTx tx false)
+    (hafter : (update m (.tapButton btn)).1.screen = .reviewTx tx true) :
+    btn = .armSign ∧ tx.isLastPage m.reviewPage = true := by
+  cases btn <;> cases hsec : m.secrets <;>
+    simp_all [update, updateTap, lockModel] <;> (try split at hafter) <;> simp_all
+
+/-- A payment that arrives for review starts unarmed, at the first page of its outputs, whatever was on
+the screen before. -/
+theorem new_review_starts_unarmed (m : Model) (tx : ReviewedTx) (h : m.secrets.isSome = true) :
+    (update m (.hostTxReviewed tx)).1.screen = .reviewTx tx false ∧
+    (update m (.hostTxReviewed tx)).1.reviewPage = 0 := by
+  cases hsec : m.secrets <;> simp_all [update]
+
 end Tricorder.Proofs

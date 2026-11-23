@@ -42,6 +42,9 @@ elab "#gate_axioms " id:ident : command => do
 #gate_axioms Tricorder.Proofs.sign_requires_armed_review
 #gate_axioms Tricorder.Proofs.locked_cannot_sign
 #gate_axioms Tricorder.Proofs.tap_preserves_safe
+#gate_axioms Tricorder.Proofs.arming_requires_last_page
+#gate_axioms Tricorder.Proofs.new_review_starts_unarmed
+#gate_axioms Tricorder.Proofs.wrapChars_complete
 
 -- Verified Minimal Runtime Proofs (Zero-on-Free Heap & Big-Num Arithmetic)
 #gate_axioms Mini.Alloc.empty_sound
@@ -85,7 +88,8 @@ elab "#gate_axioms " id:ident : command => do
 -- Zero-Filesystem Wire Framing & Locked/Mainnet Security Gating
 #gate_axioms Kernel.WireProofs.op_roundtrip
 #gate_axioms Kernel.WireProofs.locked_blocks_privileged
-#gate_axioms Kernel.WireProofs.mainnet_blocks_key_injection
+#gate_axioms Kernel.WireProofs.reviewing_blocks_push
+#gate_axioms Kernel.WireProofs.only_test_builds_inject_keys
 #gate_axioms Kernel.WireProofs.decode_rejects_short
 #gate_axioms Kernel.WireProofs.decode_rejects_bad_magic
 

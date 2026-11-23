@@ -3,7 +3,7 @@
 Length-prefixed request/response frame protocol shared identically across:
 - QEMU bare-metal PL011 UART (`Kernel/Qemu/Pl011.lean`)
 - Pixel 9 Pro XL polled USB-C DWC3 raw bulk (`Kernel/Komodo/Dwc3.lean`)
-- Host CLI (`Tools/TricorderHost.lean`)
+- Host CLI (`tools/tricorder_usb.c`)
 
 Wire Format (all multi-byte integers little-endian):
 - `[0..4)`       Magic `"TRIW"` (`0x54, 0x52, 0x49, 0x57`)
@@ -13,9 +13,9 @@ Wire Format (all multi-byte integers little-endian):
 - `[8..8+len)`   `payload`
 - `[8+len..12+len)` `crc32 : UInt32` (IEEE 802.3 CRC-32 over `[0..8+len)`)
 
-Notice: the host NEVER gets a direct "sign now" command — `pushOverridePsbt` and `pushApprovePsbt`
-only load a PSBT onto the Pixel's OLED screen for human review; actual signing ALWAYS requires
-physical two-step arm + confirm on the device's buttons!
+Notice: the host NEVER gets a direct "sign now" command — `pushOverride`
+only loads a PSBT onto the Pixel's OLED screen for human review; actual signing ALWAYS requires
+physical two-step arm + confirm on the device's buttons.
 
 Formal round-trip, bounds, and locked-state gating proofs live in `Kernel/WireProofs.lean`. -/
 
@@ -30,12 +30,11 @@ def maxPayload : Nat := 16384
 inductive Op where
   | ping           -- 0x01: liveness + network name
   | getStatus      -- 0x02: current screen, unlocked?, hasWallet?, armed?
-  | getKeys        -- 0x03: export override xpub + approver pubkey (requires unlocked)
+  | getKeys        -- 0x03: export override xpub (requires unlocked)
   | pushDescriptor -- 0x04: load wallet descriptor onto OLED for user verification (requires unlocked)
   | pushOverride   -- 0x05: load Override PSBT onto OLED for review (requires unlocked + wallet)
-  | pushApprove    -- 0x06: load Approver PSBT onto OLED for review (requires unlocked)
-  | pollResult     -- 0x07: read last signed PSBT / approval string if user signed (requires unlocked)
-  | injectKey      -- 0x10: test/QEMU key event (0=prev,1=next,2=select,3=back); disabled on mainnet!
+  | pollResult     -- 0x07: read the last signed PSBT, if its holder signed (requires unlocked)
+  | injectKey      -- 0x10: a key event from the host (0=prev,1=next,2=select,3=back); regtest builds only
   | respOk         -- 0x80: success reply payload
   | respErr        -- 0x81: UTF-8 error message
   deriving BEq, DecidableEq, Repr, Inhabited
@@ -46,7 +45,6 @@ def Op.toByte : Op → UInt8
   | .getKeys        => 0x03
   | .pushDescriptor => 0x04
   | .pushOverride   => 0x05
-  | .pushApprove    => 0x06
   | .pollResult     => 0x07
   | .injectKey      => 0x10
   | .respOk         => 0x80
@@ -58,7 +56,6 @@ def Op.ofByte? : UInt8 → Option Op
   | 0x03 => some .getKeys
   | 0x04 => some .pushDescriptor
   | 0x05 => some .pushOverride
-  | 0x06 => some .pushApprove
   | 0x07 => some .pollResult
   | 0x10 => some .injectKey
   | 0x80 => some .respOk
@@ -67,13 +64,25 @@ def Op.ofByte? : UInt8 → Option Op
 
 /-- Whether an operation requires the vault to be unlocked on the device. -/
 def Op.requiresUnlocked : Op → Bool
-  | .getKeys | .pushDescriptor | .pushOverride | .pushApprove | .pollResult => true
+  | .getKeys | .pushDescriptor | .pushOverride | .pollResult => true
   | _ => false
 
-/-- Whether an operation is allowed in the current `(unlocked, isMainnet)` security state. -/
-def Op.allowed (op : Op) (unlocked : Bool) (isMainnet : Bool) : Bool :=
+/-- Whether an operation puts something new on the screen for its holder to review. -/
+def Op.isPush : Op → Bool
+  | .pushDescriptor | .pushOverride => true
+  | _ => false
+
+/-- Whether an operation is allowed in the current security state.
+
+- `unlocked`: the vault is open.
+- `reviewing`: a wallet or a payment is on the screen, waiting for its holder's answer. Nothing may replace
+  it from the cable: what is read is what is signed. Its holder answers on the device first.
+- `testBuild`: the image was built for a test chain with no value (regtest). Only there may the host press
+  the buttons, which the tests under emulation need; on signet and mainnet a person presses them. -/
+def Op.allowed (op : Op) (unlocked : Bool) (reviewing : Bool) (testBuild : Bool) : Bool :=
   if op.requiresUnlocked && !unlocked then false
-  else if op == .injectKey && isMainnet then false
+  else if op.isPush && reviewing then false
+  else if op == .injectKey && !testBuild then false
   else true
 
 structure Frame where
