@@ -11,6 +11,8 @@ import Kernel.GpioKeysProofs
 import Kernel.TouchProofs
 import Kernel.IdleProofs
 import Kernel.UsbLinkProofs
+import Kernel.UsbChipsProofs
+import Kernel.Hsi2cFrameProofs
 import Kernel.Dwc3Proofs
 import Tricorder.Proofs.LayoutProofs
 import Tricorder.Proofs.StateProofs
@@ -125,6 +127,19 @@ elab "#gate_axioms " id:ident : command => do
 -- The record of the USB link a regtest image keeps: it stays small and holds the present state
 #gate_axioms Kernel.UsbLinkProofs.note_bounded
 #gate_axioms Kernel.UsbLinkProofs.note_keeps_newest
+
+-- A regtest image's look at the chips between the USB controller and the connector: reading a register
+-- writes nothing but its number, a bus whose clock may stop is left alone, and the record stays small
+#gate_axioms Kernel.Hsi2cFrameProofs.plan_writes_only_the_register_number
+#gate_axioms Kernel.Hsi2cFrameProofs.plan_reads_within_the_queue
+#gate_axioms Kernel.Hsi2cFrameProofs.plan_ends_with_a_stop
+#gate_axioms Kernel.Hsi2cFrameProofs.mayTouch_needs_running_clocks
+#gate_axioms Kernel.Hsi2cFrameProofs.mayTouch_needs_i2c
+#gate_axioms Kernel.Hsi2cFrameProofs.running_refuses_automatic_gating
+#gate_axioms Kernel.Hsi2cFrameProofs.running_refuses_closed
+#gate_axioms Kernel.UsbChipsProofs.note_bounded
+#gate_axioms Kernel.UsbChipsProofs.note_keeps_newest
+#gate_axioms Kernel.UsbChipsProofs.reads_fit_the_queue
 
 -- Bare-Metal USB-C Synopsys DWC3 Descriptor & SETUP Bounds
 #gate_axioms Kernel.Dwc3Proofs.deviceDescriptor_size

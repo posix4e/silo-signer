@@ -155,10 +155,17 @@ build/tricorder-usb push-override payment.psbt  # a payment, for its holder to r
 build/tricorder-usb poll                        # the signed payment, once it is signed
 ```
 
-**A cable that is pulled does not come back.** The signer goes on running, and its buttons and screen work,
-but the host does not see it again until the phone is restarted, and a restart loses the key. So plug the
-cable in before entering the words, and leave it in. Seen on the Pixel on 2026-11-23, with the panel lit and
-with it dark, in regtest and mainnet images:
+**A cable that is pulled comes back only if the signer was started without one.** Start the phone with the
+cable out, plug it in once the signer's screen is up, and the cable can then be pulled and put back: on
+2026-11-23, in three such starts of regtest images, fourteen of fifteen pulls of five to ten seconds came
+back, the host setting the signer up again within a third of a second, and eight in a row in the last start,
+four of them with nothing done by the signer at all. Started with the cable in, the first pull of more than
+about three seconds loses the host until the phone is restarted, and a restart loses the key: none came back
+in five such starts. Why the start matters is not known. The USB controller's and PHY's registers, both
+buses' pins and every regulator's control byte of both PMICs read the same after either start; the
+bootloader is what differs, and the port controller, which has not been read, is where it could leave a
+difference. This was seen with the panel lit; a dark panel was not tried after a start with the cable out.
+What else was seen that day, in regtest and mainnet images started with the cable in:
 
 - The USB controller is not what fails. A regtest image keeps a record of the controller's link
   (`Kernel/UsbLink.lean`, shown in its status line and printed by `tools/bench/lab_usb.py`): with the cable
@@ -166,11 +173,37 @@ with it dark, in regtest and mainnet images:
   still configured, and no reset from the host ever arrives.
 - Having the signer take itself off the bus and put itself back, every three seconds for seven minutes, with
   and without waking the USB PHY again, did not bring the host back. That change was taken out again.
-- What is between the controller and the connector is set up by the bootloader and has no driver here: the
-  plug-detection chip (`max77759tcpc`, I2C address `0x25` on the bus at `0x108C0000`) and the USB 2 repeater
-  (`samsung,eusb-repeater`, `0x3E` on the bus at `0x10C90000`, supplied by `S2MPG14_LDO19`), from the device
-  tree the bootloader hands over. Neither bus is in the register windows the signer maps. Which of the two
-  stops the host seeing the signer is not known.
+- Between the controller and the connector are two chips the bootloader sets up, from the device tree it
+  hands over: the USB-C port controller (`max77759tcpc`, I2C address `0x25` on the bus at `0x108C0000`) and
+  the eUSB2 repeater (`samsung,eusb-repeater`, `0x3E` on the bus at `0x10C90000`, supplied by `S2MPG14_LDO19`).
+  A regtest image now reads them once a second with a polled I2C master that can only read a register
+  (`Kernel/Hsi2c.lean`, behind a check of each bus's clock gates), keeps a record (`Kernel/UsbChips.lean`),
+  shows it at the foot of its screen and hands it to `tools/bench/lab_chips.py`.
+- The repeater is not what changes. Its fourteen registers that are read, and the control byte of its supply,
+  were the same before the pull, after it, and ten seconds after the cable was back.
+- After the cable is back, the Mac's own port reports the signer's end of the cable (`CC` active) and no USB 2
+  device on it; with the signer answering, the same port reports both.
+- Switching the repeater's port off and on did not bring the host back: alone, with the controller restarted,
+  with the USB PHY woken again as well, and with the repeater's mode and tuning written again from the device
+  tree, twenty tries three seconds apart, each of which the repeater acknowledged. Nor did doing it while the
+  cable was out, sixteen times, three of them before the cable was back. Nor did ending the session at the
+  controller as a cable leaving would. None of those changes is in the tree.
+- Switching the repeater's supply off and on while the cable was out, writing its mode and tuning again,
+  waking the PHY and restarting the controller left the controller as it is after a start with the cable out
+  (link suspended, not set up, waiting for a host), and the host still did not come back. So what a start
+  with the cable in leaves different is not in the controller, the PHY or the repeater.
+- The bootloader's own fastboot mode comes back after a pull every time, and a flipped plug or a direct port
+  in place of a dock makes no difference.
+- After some replugs the host does reset the link and then does not set the signer up; after most, no reset
+  arrives at all.
+- The bootloader counts starts of slot `_b` that nothing confirms, and after three more it starts slot `_a`
+  instead; `fastboot --set-active=b` gives slot `_b` three again.
+- The port controller has not been read. The bootloader leaves its bus's serial block unconfigured and its
+  two pins pulled down; set to I2C from the host, both lines still read low with the pins pulled up, so no
+  transfer starts. No regulator of either PMIC that the device tree expects on explains it: the one 1.8 V
+  rail it marks on at start that reads off, `L7S_SENSORS`, was switched on and the lines stayed low. The
+  vendor's driver closes a switch in the data lines inside this chip (`USBSW_CTRL`, register `0x93`) each time
+  a cable arrives. That switch is what is left to suspect, by elimination and not by measurement.
 - Once, a mainnet image came back onto USB by itself some minutes after a replug. Why is not known, and it
   did not happen again in two later tries of seven and ten minutes.
 
