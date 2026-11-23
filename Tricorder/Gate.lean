@@ -10,6 +10,7 @@ import Kernel.FbProofs
 import Kernel.GpioKeysProofs
 import Kernel.TouchProofs
 import Kernel.IdleProofs
+import Kernel.UsbLinkProofs
 import Kernel.Dwc3Proofs
 import Tricorder.Proofs.LayoutProofs
 import Tricorder.Proofs.StateProofs
@@ -120,6 +121,10 @@ elab "#gate_axioms " id:ident : command => do
 #gate_axioms Kernel.IdleProofs.quiet_when_off_stays_off
 #gate_axioms Kernel.IdleProofs.blank_only_from_quiet
 #gate_axioms Kernel.IdleProofs.on_delivers
+
+-- The record of the USB link a regtest image keeps: it stays small and holds the present state
+#gate_axioms Kernel.UsbLinkProofs.note_bounded
+#gate_axioms Kernel.UsbLinkProofs.note_keeps_newest
 
 -- Bare-Metal USB-C Synopsys DWC3 Descriptor & SETUP Bounds
 #gate_axioms Kernel.Dwc3Proofs.deviceDescriptor_size

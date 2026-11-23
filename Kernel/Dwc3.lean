@@ -1,5 +1,6 @@
 import Kernel.Hw
 import Kernel.Wire
+import Kernel.UsbLink
 
 /-! # Pure-Lean Polled Synopsys DWC3 USB-C Device Driver (`Kernel.Dwc3`)
 
@@ -630,6 +631,21 @@ def Device.pollFrame (d : Device) : BaseIO (Device × Option (Except String Wire
         cur := { cur with bulkInBusy := false }
 
   return (cur, emitted)
+
+/-- One look at the link, for `Kernel.UsbLink`: the controller's status and control registers, read only,
+and only when its power domain is on and its bus clock is not gated, as `pollFrame` insists. The status
+keeps its speed (bits 2:0), link state (21:18) and halted bit (22); the frame counter is masked off. -/
+def Device.sample (d : Device) (ticks : Nat) : BaseIO UsbLink.Sample := do
+  let gatedNow : UsbLink.Sample :=
+    { ticks, events := d.evSeen, lastEv := d.lastEv, configured := d.configured, gated := true }
+  if d.hasPmu then
+    if ((← Hw.read32 pmuPdHsi0Status) &&& 0x1) == 0 then return gatedNow
+  if d.hasBlkcon then
+    if ((← Hw.read32 (usbBlkconBase + blkconLinkCtrl)) &&& ((1 : UInt32) <<< 24)) != 0 then return gatedNow
+  let dsts ← Hw.read32 (d.base + regDsts)
+  let dctl ← Hw.read32 (d.base + regDctl)
+  return { ticks, dsts := dsts &&& 0x007C0007, dctl, events := d.evSeen, lastEv := d.lastEv,
+           configured := d.configured, gated := d.clkGated }
 
 /-- Transmits one CRC-32-protected `Kernel.Wire.Frame` over USB-C Bulk-IN (`0x81`). -/
 def Device.sendFrame (d : Device) (f : Wire.Frame) : BaseIO Device := do
