@@ -188,6 +188,10 @@ What else was seen that day, in regtest and mainnet images started with the cabl
   tree, twenty tries three seconds apart, each of which the repeater acknowledged. Nor did doing it while the
   cable was out, sixteen times, three of them before the cable was back. Nor did ending the session at the
   controller as a cable leaving would. None of those changes is in the tree.
+- Switching the repeater's supply off and on while the cable was out, writing its mode and tuning again,
+  waking the PHY and restarting the controller left the controller as it is after a start with the cable out
+  (link suspended, not set up, waiting for a host), and the host still did not come back. So what a start
+  with the cable in leaves different is not in the controller, the PHY or the repeater.
 - The bootloader's own fastboot mode comes back after a pull every time, and a flipped plug or a direct port
   in place of a dock makes no difference.
 - After some replugs the host does reset the link and then does not set the signer up; after most, no reset
