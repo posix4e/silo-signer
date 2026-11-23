@@ -24,7 +24,7 @@ runs under QEMU, which is where it is tested.
   a key from 12 words on the touchscreen, accepted a SegWit v0 wallet of two of three keys, and signed one
   payment of 25,000 sats from it, which mainnet confirmed in block 977,106
   (`ad56e89c5505c7f8c457defaeef69575cd03e26edf62ecf335f9882bb317fefe`). The wallet held under 100,000 sats.
-  Nothing changed after that commit has run on the phone.
+  Nothing changed after that commit has run on the phone in a signet or mainnet image.
 - That is the only wallet with money in it whose key it has held, and nobody but its author has read it.
 - On the Pixel the key is in memory only: switching the phone off loses it, and it comes back from its 12 or
   24 words. Keeping it on the phone's storage is written and tested under QEMU but is not safe to use yet (see
@@ -59,9 +59,13 @@ five minutes shows the lock screen. What "dark" is, exactly:
   USB; and the processor, at its usual speed.
 - In a regtest image the processor sleeps between looks at the buttons, the glass and the cable, about 370
   times a second (`wfe`, woken by the timer's event stream). In signet and mainnet images it does not sleep:
-  it spins as before, until the sleep has been seen to end on a phone. An image whose sleep did not end would
-  be dark and deaf until switched off, and switching off loses the key.
-- None of this has run on the phone, and how much power it saves has not been measured.
+  it spins as before. An image whose sleep did not end would be dark and deaf until switched off, and
+  switching off loses the key, so the sleep was tried in a regtest image first.
+- A regtest image of commit `0f631c9` ran on the Pixel on 2026-11-22. Its panel went dark a minute after the
+  last press, it answered the cable through five minutes of dark and sleep, it locked itself in the dark at
+  five minutes with the panel still dark, a press from the host then lit the lock screen and pressed nothing,
+  and a touch lit a dark panel. How much power any of this saves has not been measured, and no signet or
+  mainnet image with it has run on the phone.
 
 ## What is proved, and what is not
 
