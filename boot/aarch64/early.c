@@ -940,6 +940,18 @@ void early_boot(uint64_t fdt_phys, uint64_t initial_el) {
          * (acpm_ipc in zumapro.dtsi). */
         add_window(0x15110000ULL, 0x1000ULL);   /* AP-to-APM mailbox */
         add_window(0x15700000ULL, 0x58000ULL);  /* APM shared memory, as the AP sees it */
+        /* The two I2C buses a regtest image looks down, at the USB-C port controller and the eUSB2
+         * repeater (Kernel/Hsi2c.lean): each bus's controller, the page of its block's clock controller that
+         * holds its two gates, the word that sets its serial block to I2C, and its pins. The port
+         * controller's pins are in pinctrl_11, above. From the bootloader's device tree, cmucal-sfr.c and
+         * pinctrl-gs.c. Signet and mainnet images read none of these. */
+        add_window(0x108C0000ULL, 0x1000ULL);   /* hsi2c_5 (USI5_PERIC0): max77759tcpc at 0x25 */
+        add_window(0x10802000ULL, 0x1000ULL);   /* cmu_peric0: USI5's gates at +0x2090, +0x2094 */
+        add_window(0x10821000ULL, 0x1000ULL);   /* sysreg_peric0: USI5 SW_CONF at +0x010 */
+        add_window(0x10C90000ULL, 0x1000ULL);   /* hsi2c_9 (USI9_PERIC1): eusb-repeater at 0x3E */
+        add_window(0x10C02000ULL, 0x1000ULL);   /* cmu_peric1: USI9's gates at +0x2070, +0x2074 */
+        add_window(0x10C21000ULL, 0x1000ULL);   /* sysreg_peric1: USI9 SW_CONF at +0x004 */
+        add_window(0x10C40000ULL, 0x1000ULL);   /* pinctrl_12 (GPIO_PERIC1): gpp19-4/5 = that bus */
         /* Discover ABL's live active OLED framebuffer directly from DPU_DMA L0..L13 registers! */
         komodo_probe_live_fb();
     }

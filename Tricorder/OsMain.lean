@@ -15,6 +15,8 @@ import Kernel.Dwc3
 import Kernel.KomodoTouch
 import Kernel.Idle
 import Kernel.UsbLink
+import Kernel.UsbChips
+import Kernel.KomodoChips
 import Kernel.Panel
 import Tricorder.BuildConfig
 import Tricorder.Network
@@ -69,6 +71,12 @@ structure BareState where
   idleSeen : Nat × Nat × Nat := (0, 0, 0)
   /-- The last few states of the USB link, newest first, kept by regtest images (`Kernel.UsbLink`). -/
   usbLog : List UsbLink.Sample := []
+  /-- The last few states of the two chips between the USB controller and the connector, newest first, how
+  many there have been, and the newest as a line for the foot of the screen (`Kernel.UsbChips`). Regtest
+  images on the Pixel only. -/
+  chipLog : List UsbChips.Sample := []
+  chipsSeen : Nat := 0
+  benchLine : String := ""
 
 private def hasWindow (wins : Array Hw.Window) (addr len : UInt64) : Bool :=
   wins.any fun w => addr ≥ w.base && w.size ≥ len && addr - w.base ≤ w.size - len
@@ -258,7 +266,12 @@ private def rebuildView (st : BareState) (resetFocus : Bool) : BareState :=
   let nBtns := (buttonsOf rawCmds).length
   let idx := if resetFocus || nBtns == 0 then 0 else st.focusIdx % nBtns
   let cmds := withFocusRing rawCmds idx st.model.network.palette.highlight
-  { st with focusIdx := idx, cmds, dirty := true }
+  -- A regtest image's line for the bench is written over the name at the foot of the screen.
+  let bench : List DrawCmd :=
+    if st.benchLine.isEmpty then []
+    else [.rect { x := 98, y := 1200 - 24 - 32 - 22 + 18, w := 432, h := 32 } st.model.network.palette.bg,
+          .text 102 (1200 - 24 - 32 - 22 + 26) st.benchLine 2 st.model.network.palette.accent]
+  { st with focusIdx := idx, cmds := cmds ++ bench, dirty := true }
 
 private def screenTag (s : Screen) : String :=
   match s with
@@ -418,6 +431,12 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
     --                       how many states follow (u32), then each, newest first: when it was first seen
     --                       (u64), status, control, events then, last event, and configured | gated << 1
     --                       (u32 each)
+    --   'c'                 the record of the two chips between the USB controller and the connector
+    --                       (`Kernel.UsbChips`): the time now (u64), how many states there have been (u32),
+    --                       how many follow (u32), then each, newest first: when it was first seen (u64), the
+    --                       supply's control byte (u32), and for the port controller and then the repeater:
+    --                       the reason it could not be read or 0 (u32), the word that goes with the reason
+    --                       (u32), and fourteen bytes of registers, zero where none was read
     -- A register outside every window ends the run: the reply is what was read so far, as an error.
     let wins ← Hw.windows
     let p := f.payload
@@ -472,6 +491,16 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
           out := push32 (push32 (push64 out s.ticks.toUInt64) s.dsts) s.dctl
           out := push32 (push32 out s.events.toUInt32) s.lastEv
           out := push32 out ((if s.configured then 1 else 0) ||| (if s.gated then 2 else 0))
+        i := i + 1
+      else if tag == 0x63 then                        -- 'c'
+        out := push64 out (← Hw.ticks)
+        out := push32 (push32 out st.chipsSeen.toUInt32) st.chipLog.length.toUInt32
+        for s in st.chipLog do
+          out := push32 (push64 out s.ticks.toUInt64) s.ldo
+          for c in [s.tcpc, s.repeater] do
+            out := push32 (push32 out c.err) c.word
+            for k in [0:14] do
+              out := out.push (c.bytes.getD k 0)
         i := i + 1
       else
         bad := some "BAD_LAB_STEP"
@@ -660,6 +689,13 @@ def bareMain : IO UInt32 := do
   let mut shownClkGated : Bool := false
   let mut powerHoldTicks : Nat := 0
   let mut swallowTap : Bool := false
+  -- The two chips between the USB controller and the connector are looked at by a regtest image on the
+  -- Pixel, two seconds after starting and then once a second: after a pulled cable is put back the
+  -- controller's own state does not change, so a look only when it does would miss what the chips do then.
+  let chipsHere := !hasPl011 && net == .regtest
+    && KomodoChips.windows.all (fun (base, size) => hasWindow wins base size)
+  let pmicHere := KomodoTouch.windows.all (fun (base, size) => hasWindow wins base size)
+  let mut lastChipTick : UInt64 := (← Hw.ticks) + 24576000
   let bootTicks := (← Hw.ticks).toNat
   st := { st with idle := { phase := .on, lastPerson := bootTicks, lastScreen := bootTicks } }
   while running do
@@ -789,6 +825,26 @@ def bareMain : IO UInt32 := do
               st ← renderIfDirty st
           else if swallowTap && t'.tap.start?.isNone && !(← KomodoTouch.waiting) then
             swallowTap := false
+      -- The two chips, in a regtest image. The first look says on the screen what it is about to touch,
+      -- step by step, since none of it has been touched on this phone before; later looks say nothing
+      -- unless something has changed. A change does not light a dark panel.
+      if chipsHere then
+        let now ← Hw.ticks
+        if now ≥ lastChipTick && now - lastChipTick ≥ 24576000 then
+          lastChipTick := now
+          let first := st.chipsSeen == 0
+          let before := st
+          let s ← KomodoChips.sample now.toNat pmicHere fun what => do
+            if first then
+              let _ ← renderIfDirty (rebuildView { before with benchLine := what } false)
+          let changed := match st.chipLog with
+            | last :: _ => !last.same s
+            | [] => true
+          if changed then
+            let seen := st.chipsSeen + 1
+            st := rebuildView { st with chipLog := UsbChips.note st.chipLog s, chipsSeen := seen,
+                                        benchLine := s.line seen } false
+            st ← renderIfDirty st
       -- The clocks: the lock, and the panel going dark.
       st := (← noteInput st .none).1
       -- Dark, every image sleeps between looks at the buttons, the glass and the cable. The sleep was
