@@ -166,11 +166,26 @@ with it dark, in regtest and mainnet images:
   still configured, and no reset from the host ever arrives.
 - Having the signer take itself off the bus and put itself back, every three seconds for seven minutes, with
   and without waking the USB PHY again, did not bring the host back. That change was taken out again.
-- What is between the controller and the connector is set up by the bootloader and has no driver here: the
-  plug-detection chip (`max77759tcpc`, I2C address `0x25` on the bus at `0x108C0000`) and the USB 2 repeater
-  (`samsung,eusb-repeater`, `0x3E` on the bus at `0x10C90000`, supplied by `S2MPG14_LDO19`), from the device
-  tree the bootloader hands over. Neither bus is in the register windows the signer maps. Which of the two
-  stops the host seeing the signer is not known.
+- Between the controller and the connector are two chips the bootloader sets up, from the device tree it
+  hands over: the USB-C port controller (`max77759tcpc`, I2C address `0x25` on the bus at `0x108C0000`) and
+  the eUSB2 repeater (`samsung,eusb-repeater`, `0x3E` on the bus at `0x10C90000`, supplied by `S2MPG14_LDO19`).
+  A regtest image now reads them once a second with a polled I2C master that can only read a register
+  (`Kernel/Hsi2c.lean`, behind a check of each bus's clock gates), keeps a record (`Kernel/UsbChips.lean`),
+  shows it at the foot of its screen and hands it to `tools/bench/lab_chips.py`.
+- The repeater is not what changes. Its fourteen registers that are read, and the control byte of its supply,
+  were the same before the pull, after it, and ten seconds after the cable was back.
+- After the cable is back, the Mac's own port reports the signer's end of the cable (`CC` active) and no USB 2
+  device on it; with the signer answering, the same port reports both.
+- Switching the repeater's port off and on did not bring the host back: alone, with the controller restarted,
+  with the USB PHY woken again as well, and with the repeater's mode and tuning written again from the device
+  tree, twenty tries three seconds apart, each of which the repeater acknowledged. That change is not in
+  the tree either.
+- The port controller has not been read. The bootloader leaves its bus's serial block unconfigured and its
+  two pins pulled down; set to I2C from the host, both lines still read low with the pins pulled up, so no
+  transfer starts. No regulator of either PMIC that the device tree expects on explains it: the one 1.8 V
+  rail it marks on at start that reads off, `L7S_SENSORS`, was switched on and the lines stayed low. The
+  vendor's driver closes a switch in the data lines inside this chip (`USBSW_CTRL`, register `0x93`) each time
+  a cable arrives. That switch is what is left to suspect, by elimination and not by measurement.
 - Once, a mainnet image came back onto USB by itself some minutes after a replug. Why is not known, and it
   did not happen again in two later tries of seven and ten minutes.
 
