@@ -65,7 +65,9 @@ five minutes shows the lock screen. What "dark" is, exactly:
   last press, it answered the cable through five minutes of dark and sleep, it locked itself in the dark at
   five minutes with the panel still dark, a press from the host then lit the lock screen and pressed nothing,
   and a touch lit a dark panel. How much power any of this saves has not been measured. Signet and mainnet
-  images were given the sleep after that run, and no signet or mainnet image with it has run on the phone.
+  images were given the sleep after that run. A mainnet image of commit `8106da7` then ran on the phone on
+  2026-11-23: left alone it was still answering the cable 90 seconds after starting, at the slower times of
+  the sleep. A mainnet image cannot be asked whether its panel is dark, and it was not watched for longer.
 
 ## What is proved, and what is not
 
