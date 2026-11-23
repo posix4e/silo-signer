@@ -69,9 +69,6 @@ structure BareState where
   idleSeen : Nat × Nat × Nat := (0, 0, 0)
   /-- The last few states of the USB link, newest first, kept by regtest images (`Kernel.UsbLink`). -/
   usbLog : List UsbLink.Sample := []
-  /-- Watches for a host that has gone quiet, and how often the link has been started over for it. -/
-  usbWatch : UsbLink.Watch := {}
-  usbRestarts : Nat := 0
 
 private def hasWindow (wins : Array Hw.Window) (addr len : UInt64) : Bool :=
   wins.any fun w => addr ≥ w.base && w.size ≥ len && addr - w.base ≤ w.size - len
@@ -90,9 +87,6 @@ private def isReviewing (m : Model) : Bool :=
 /-- An unlocked signer left alone locks itself after about five minutes, and the panel of one left alone,
 locked or not, goes dark after one. Both are counted on the Pixel's 24.576 MHz counter. -/
 private def idleConfig : Idle.Config := { screenOffTicks := 1474560000, lockTicks := 7500000000 }
-
-/-- How long the USB link may be off before it is started over: three seconds on the Pixel. -/
-private def usbQuietTicks : Nat := 73728000
 
 /-- Whether the panel is dark (`Kernel.Idle`). -/
 private def BareState.dark (st : BareState) : Bool :=
@@ -421,7 +415,7 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
     --                       person's last press or tap and since the panel last had a reason to be lit
     --                       (u64 each), and how many presses, taps and other stirrings there have been (u32 each)
     --   'u'                 the USB link's record (`Kernel.UsbLink`): the time now (u64), the events seen (u32),
-    --                       how often the link has been started over (u32), how many states follow (u32), then each, newest first: when it was first seen
+    --                       how many states follow (u32), then each, newest first: when it was first seen
     --                       (u64), status, control, events then, last event, and configured | gated << 1
     --                       (u32 each)
     -- A register outside every window ends the run: the reply is what was read so far, as an error.
@@ -473,7 +467,7 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
       else if tag == 0x75 then                        -- 'u'
         out := push64 out (← Hw.ticks)
         out := push32 out ((st.dwc3?.map (·.evSeen.toUInt32)).getD 0)
-        out := push32 (push32 out st.usbRestarts.toUInt32) st.usbLog.length.toUInt32
+        out := push32 out st.usbLog.length.toUInt32
         for s in st.usbLog do
           out := push32 (push32 (push64 out s.ticks.toUInt64) s.dsts) s.dctl
           out := push32 (push32 out s.events.toUInt32) s.lastEv
@@ -716,22 +710,10 @@ def bareMain : IO UInt32 := do
             lastUsbUiTick := 0
             st := rebuildView { st with model := { st.model with statusMsg := s!"USB EV={usb'.evSeen} R={usb'.lastSetupReq} V={usb'.lastSetupVal}" } } false
             st ← showIfChanged st
-        -- A host that has gone quiet (a cable pulled and put back) does not find the signer again by itself:
-        -- after three seconds without a link the signer takes itself off the bus and puts itself back
-        -- (`Kernel.UsbLink.Watch`).
-        let s ← usb'.sample (← Hw.ticks).toNat
-        let (watch, action) := st.usbWatch.step usbQuietTicks s.ticks (s.configured && s.linkState == 0 && !s.gated) s.events
-        st := { st with usbWatch := watch }
-        if let .reconnect phy := action then
-          let usb'' ← usb'.reconnect phy
-          st := { st with dwc3? := some usb'', usbRestarts := st.usbRestarts + 1 }
-          if isTestBuild st.model then
-            let msg := s!"USB STARTED OVER {st.usbRestarts}{if phy then " WITH PHY" else ""}"
-            st := rebuildView { st with model := { st.model with statusMsg := msg } } false
-            st ← renderIfDirty st
         -- A regtest image keeps a record of the link and says each change of it in the status line, so that
         -- a link that has gone can be read off the screen. It does not light a dark panel.
         if isTestBuild st.model then
+          let s ← usb'.sample (← Hw.ticks).toNat
           let changed := match st.usbLog with
             | last :: _ => !last.same s
             | [] => true
@@ -741,7 +723,6 @@ def bareMain : IO UInt32 := do
             st ← renderIfDirty st
         match frame? with
         | some (.error err) =>
-          let usb' := st.dwc3?.getD usb'
           let usb'' ← usb'.sendFrame { op := .respErr, payload := err.toUTF8 }
           st := { st with dwc3? := some usb'' }
         | some (.ok frame) =>

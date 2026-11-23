@@ -24,19 +24,19 @@ LINK = {0: "on", 1: "U1", 2: "U2", 3: "suspended", 4: "no host", 5: "waiting", 6
 
 def record():
     data = run(b"u")
-    now, events, restarts, n = struct.unpack_from("<QIII", data, 0)
-    rows = [struct.unpack_from("<QIIIII", data, 20 + 28 * k) for k in range(n)]
-    return now, events, restarts, rows
+    now, events, n = struct.unpack_from("<QII", data, 0)
+    rows = [struct.unpack_from("<QIIIII", data, 16 + 28 * k) for k in range(n)]
+    return now, events, rows
 
 
 def show():
-    now, events, restarts, rows = record()
+    now, events, rows = record()
     for ticks, dsts, dctl, ev, last, flags in reversed(rows):
         state = (dsts >> 18) & 0xF
         print(f"  {(now - ticks) / TICKS:8.1f} s ago  link {LINK.get(state, state):9}  speed {dsts & 7}"
               f"  run {dctl >> 31}  halted {(dsts >> 22) & 1}  configured {flags & 1}  gated {(flags >> 1) & 1}"
               f"  events {ev}  last {last:#010x}")
-    print(f"  now: {events} events, started over {restarts} time(s), {len(rows)} states kept")
+    print(f"  now: {events} events, {len(rows)} states kept")
 
 
 def answers():

@@ -272,7 +272,6 @@ structure Device where
   lastSetupVal : UInt16 := 0
   hasPmu : Bool := false
   hasBlkcon : Bool := false
-  hasEusbcon : Bool := false
   clkGated : Bool := false
   rxAccum : ByteArray := ByteArray.empty
   deriving Inhabited
@@ -345,13 +344,27 @@ private def delayUs (us : UInt64) : BaseIO Unit := do
     if t1 - t0 ≥ need then break
     Hw.pause
 
-/-- Wakes the link block and the eUSB2 PHY, as the vendor's drivers do (`exynos-usb-blkcon.c` init_link,
-`phy-exynos-eusb.c` `phy_exynos_eusb_initiate`). Done once at start, and again by `Device.reconnect` when
-restarting the controller alone has not brought a host back. -/
-private def wakePhy (hasBlk hasEusb : Bool) : BaseIO Unit := do
+/-- Safe probe & initialization of Synopsys DWC3 in USB 2.0 High-Speed Device mode.
+    Includes Tensor G4 (`zumapro`) `phy_exynos_eusb_initiate` + `exynos_usbcon_init_link` wakeup! -/
+def init (base : UInt64 := dwc3DefaultBase) : BaseIO (Except String Device) := do
+  let wins ← Hw.windows
+  let hasWin (a len : UInt64) : Bool :=
+    wins.any fun w => a ≥ w.base && w.size ≥ len && a - w.base ≤ w.size - len
+  if !hasWin base 0xD000 then
+    return .error "DWC3_NO_WINDOW"
+  if hasWin pmuPdHsi0Status 4 then
+    let pd ← Hw.read32 pmuPdHsi0Status
+    -- On Tensor G4 (`zumapro`), PMU_ALIVE STATUS bit 0 (`0x1`) = powered ON!
+    if (pd &&& 0x1) == 0 then
+      return .error s!"USB_PD_HSI0_OFF({pd})"
+
+  -- Note: `PMU_ALIVE + 0x3EB0` (`USBDP_PHY_ISO`) is an EL3-privileged register (`rmw_priv_reg` in
+  -- `phy-exynos-usbdrd-eusb.c`); NEVER write it directly from EL1 (direct NS write trips Tensor G4's
+  -- PMU firewall and locks out subsequent `ARM_SMCCC_TRNG_RND64` calls!). ABL already leaves it un-isolated.
+
   -- 0b. Bring up Tensor G4 `usbdrd_blkcon` (`exynos-usb-blkcon.c`: init_link + detach_pipe3_phy)
   --     CRITICAL: set `dis_buspend_qact` (bit 13) so HWACG NEVER clock-gates DWC3 when macOS autosuspends USB!
-  if hasBlk then
+  if hasWin usbBlkconBase 0x20 then
     let lc0 ← Hw.read32 (usbBlkconBase + blkconLinkCtrl)
     let lc1 : UInt32 := (lc0 &&& (~~~((1 : UInt32) <<< 8))) ||| 0x00003E00 -- dis_*_qact [13:9] incl. buspend, force_qact=0
     Hw.write32 (usbBlkconBase + blkconLinkCtrl) lc1
@@ -369,7 +382,7 @@ private def wakePhy (hasBlk hasEusb : Bool) : BaseIO Unit := do
     Hw.write32 (usbBlkconBase + blkconUtmiCtrl) (utmi ||| 0x3)
 
   -- 0c. Wake Tensor G4 4nm eUSB2 PHY (`phy-exynos-eusb.c` `phy_exynos_eusb_initiate`, ver 0x701, 19.2MHz)
-  if hasEusb then
+  if hasWin usbEusbconBase 0x30 then
     -- Step 1: Assert phy_reset + utmi_port_reset with override enables
     let r0 ← Hw.read32 (usbEusbconBase + eusbconRstCtrl)
     Hw.write32 (usbEusbconBase + eusbconRstCtrl) (r0 ||| 0x33)
@@ -402,11 +415,21 @@ private def wakePhy (hasBlk hasEusb : Bool) : BaseIO Unit := do
     let r2 ← Hw.read32 (usbEusbconBase + eusbconRstCtrl)
     Hw.write32 (usbEusbconBase + eusbconRstCtrl) (r2 &&& (~~~(0x30 : UInt32)))
 
-/-- Stops the controller, resets it, and starts it again as a high-speed device waiting for a host, with
-the buffers `d` already has. This is how the driver starts, and how it starts over (`Device.reconnect`). -/
-private def startCore (d : Device) : BaseIO Device := do
-  let base := d.base
-  let evBuf := d.evBuf
+  let snps ← Hw.read32 (base + regGsnpsId)
+  let hi := snps >>> 16
+  if hi != 0x5533 && hi != 0x3331 && hi != 0x3332 then
+    return .error s!"USB_BAD_SNPSID({snps})"
+
+  -- Allocate DMA buffers (4 KiB page-aligned in Normal-NC DMA arena)
+  let evBuf ← Hw.alloc 4096
+  let trbPage ← Hw.alloc 4096
+  let setupBuf ← Hw.alloc 4096
+  let ep0DataBuf ← Hw.alloc 4096
+  let bulkOutBuf ← Hw.alloc 4096
+  let bulkInBuf ← Hw.alloc 4096
+  if evBuf == 0 || trbPage == 0 || setupBuf == 0 || ep0DataBuf == 0 || bulkOutBuf == 0 || bulkInBuf == 0 then
+    return .error "USB_DMA_ALLOC_FAIL"
+
   -- 1. Stop controller (wait DEVCTRLHLT bit 22), then issue device-only soft reset (`DCTL.CSFTRST`)
   let dctl0 ← Hw.read32 (base + regDctl)
   Hw.write32 (base + regDctl) (dctl0 &&& (~~~((1 : UInt32) <<< 31)))
@@ -446,60 +469,18 @@ private def startCore (d : Device) : BaseIO Device := do
 
   -- 5. Configure EP0-OUT & EP0-IN and arm initial 8-byte SETUP TRB
   configureEp0 base 64
-  let d0 : Device := { d with
-    evPos := 0, ep0Phase := .setup, ep0OutRsc := 0, ep0InRsc := 0, ep0OutActive := false, ep0InActive := false,
-    configured := false, bulkOutArmed := false, bulkInBusy := false, clkGated := false,
-    rxAccum := ByteArray.empty }
+  let d0 : Device := {
+    base, snpsId := snps, evBuf, trbPage, setupBuf, ep0DataBuf, bulkOutBuf, bulkInBuf,
+    hasPmu := hasWin pmuPdHsi0Status 4,
+    hasBlkcon := hasWin usbBlkconBase 0x20
+  }
   let d1 ← armEp0Setup d0
 
   -- 6. Connect to USB host (`DCTL.RUN_STOP = 1`, U1/U2 disabled per `dwc3-exynos.c`)
   let dctl1 ← Hw.read32 (base + regDctl)
   let dctl2 := (dctl1 &&& (~~~((1 : UInt32) <<< 10 ||| (1 : UInt32) <<< 12))) ||| ((1 : UInt32) <<< 31)
   Hw.write32 (base + regDctl) dctl2
-  return d1
-
-/-- Safe probe & initialization of Synopsys DWC3 in USB 2.0 High-Speed Device mode.
-    Includes Tensor G4 (`zumapro`) `phy_exynos_eusb_initiate` + `exynos_usbcon_init_link` wakeup! -/
-def init (base : UInt64 := dwc3DefaultBase) : BaseIO (Except String Device) := do
-  let wins ← Hw.windows
-  let hasWin (a len : UInt64) : Bool :=
-    wins.any fun w => a ≥ w.base && w.size ≥ len && a - w.base ≤ w.size - len
-  if !hasWin base 0xD000 then
-    return .error "DWC3_NO_WINDOW"
-  if hasWin pmuPdHsi0Status 4 then
-    let pd ← Hw.read32 pmuPdHsi0Status
-    -- On Tensor G4 (`zumapro`), PMU_ALIVE STATUS bit 0 (`0x1`) = powered ON!
-    if (pd &&& 0x1) == 0 then
-      return .error s!"USB_PD_HSI0_OFF({pd})"
-
-  -- Note: `PMU_ALIVE + 0x3EB0` (`USBDP_PHY_ISO`) is an EL3-privileged register (`rmw_priv_reg` in
-  -- `phy-exynos-usbdrd-eusb.c`); NEVER write it directly from EL1 (direct NS write trips Tensor G4's
-  -- PMU firewall and locks out subsequent `ARM_SMCCC_TRNG_RND64` calls!). ABL already leaves it un-isolated.
-
-  wakePhy (hasWin usbBlkconBase 0x20) (hasWin usbEusbconBase 0x30)
-
-  let snps ← Hw.read32 (base + regGsnpsId)
-  let hi := snps >>> 16
-  if hi != 0x5533 && hi != 0x3331 && hi != 0x3332 then
-    return .error s!"USB_BAD_SNPSID({snps})"
-
-  -- Allocate DMA buffers (4 KiB page-aligned in Normal-NC DMA arena)
-  let evBuf ← Hw.alloc 4096
-  let trbPage ← Hw.alloc 4096
-  let setupBuf ← Hw.alloc 4096
-  let ep0DataBuf ← Hw.alloc 4096
-  let bulkOutBuf ← Hw.alloc 4096
-  let bulkInBuf ← Hw.alloc 4096
-  if evBuf == 0 || trbPage == 0 || setupBuf == 0 || ep0DataBuf == 0 || bulkOutBuf == 0 || bulkInBuf == 0 then
-    return .error "USB_DMA_ALLOC_FAIL"
-
-  let d0 : Device := {
-    base, snpsId := snps, evBuf, trbPage, setupBuf, ep0DataBuf, bulkOutBuf, bulkInBuf,
-    hasPmu := hasWin pmuPdHsi0Status 4,
-    hasBlkcon := hasWin usbBlkconBase 0x20,
-    hasEusbcon := hasWin usbEusbconBase 0x30
-  }
-  return .ok (← startCore d0)
+  return .ok d1
 
 /-- Attempts to extract one complete length-prefixed `Kernel.Wire` frame from `rxAccum`. -/
 private def tryExtractWireFrame (acc : ByteArray) : Option (Except String Wire.Frame × ByteArray) :=
@@ -665,18 +646,6 @@ def Device.sample (d : Device) (ticks : Nat) : BaseIO UsbLink.Sample := do
   let dctl ← Hw.read32 (d.base + regDctl)
   return { ticks, dsts := dsts &&& 0x007C0007, dctl, events := d.evSeen, lastEv := d.lastEv,
            configured := d.configured, gated := d.clkGated }
-
-/-- Starts the link over, for a host that has gone quiet (`Kernel.UsbLink.Watch`): the controller is stopped,
-which takes the signer off the bus, and started again, which puts it back for the host to find. With
-`phy`, the link block and the eUSB2 PHY are woken again first, as at start. Nothing is done if the
-controller's power domain is off or its clock is gated. The count of events seen is kept. -/
-def Device.reconnect (d : Device) (phy : Bool) : BaseIO Device := do
-  if d.hasPmu then
-    if ((← Hw.read32 pmuPdHsi0Status) &&& 0x1) == 0 then return d
-  if d.hasBlkcon then
-    if ((← Hw.read32 (usbBlkconBase + blkconLinkCtrl)) &&& ((1 : UInt32) <<< 24)) != 0 then return d
-  if phy then wakePhy d.hasBlkcon d.hasEusbcon
-  startCore d
 
 /-- Transmits one CRC-32-protected `Kernel.Wire.Frame` over USB-C Bulk-IN (`0x81`). -/
 def Device.sendFrame (d : Device) (f : Wire.Frame) : BaseIO Device := do

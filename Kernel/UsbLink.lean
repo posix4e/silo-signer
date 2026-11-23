@@ -41,38 +41,4 @@ def Sample.linkState (s : Sample) : UInt32 := (s.dsts >>> 18) &&& 0xF
 /-- The speed the link came up at: 0 is high speed. -/
 def Sample.speed (s : Sample) : UInt32 := s.dsts &&& 0x7
 
-/-! ## Starting the link over when the host has gone quiet
-
-The driver tells the controller a cable is always there, so the controller never reports one leaving: it
-reports a suspended link, and stays configured. A host that comes back to that does not find the signer. So
-when the link has not been on for `quietTicks`, with no event from the controller in that time, the signer
-takes itself off the bus and puts itself back, and goes on doing so at that interval until a host answers.
-The first try restarts the controller alone; every second one wakes the PHY again as well. -/
-
-/-- What the driver is asked to do. -/
-inductive Action where
-  | none
-  /-- Restart the controller; `phy` says whether to wake the PHY again first. -/
-  | reconnect (phy : Bool)
-  deriving DecidableEq, Repr, Inhabited
-
-/-- `quietSince`: when the link was first seen not on, or last started over. `events`: the controller's count
-of events at the last look. `tries`: how many times it has been started over since it was last on. -/
-structure Watch where
-  quietSince : Option Nat := none
-  events : Nat := 0
-  tries : Nat := 0
-  deriving Inhabited
-
-/-- One look. `on` is a configured link that is on; `events` is the controller's count of events so far. -/
-def Watch.step (quietTicks : Nat) (w : Watch) (now : Nat) (on : Bool) (events : Nat) : Watch × Action :=
-  if on then ({ quietSince := none, events, tries := 0 }, .none)
-  else if events != w.events then ({ w with quietSince := some now, events }, .none)
-  else match w.quietSince with
-    | none => ({ w with quietSince := some now }, .none)
-    | some t =>
-      if now - t ≥ quietTicks then
-        ({ w with quietSince := some now, tries := w.tries + 1 }, .reconnect (w.tries % 2 == 1))
-      else (w, .none)
-
 end Kernel.UsbLink

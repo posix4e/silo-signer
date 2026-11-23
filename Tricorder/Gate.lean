@@ -125,12 +125,6 @@ elab "#gate_axioms " id:ident : command => do
 -- The record of the USB link a regtest image keeps: it stays small and holds the present state
 #gate_axioms Kernel.UsbLinkProofs.note_bounded
 #gate_axioms Kernel.UsbLinkProofs.note_keeps_newest
--- Starting the USB link over for a host that has gone quiet: never a link that is on or busy, and at most
--- once an interval
-#gate_axioms Kernel.UsbLinkProofs.on_never_reconnects
-#gate_axioms Kernel.UsbLinkProofs.busy_never_reconnects
-#gate_axioms Kernel.UsbLinkProofs.reconnect_only_after_quiet
-#gate_axioms Kernel.UsbLinkProofs.reconnect_restarts_the_clock
 
 -- Bare-Metal USB-C Synopsys DWC3 Descriptor & SETUP Bounds
 #gate_axioms Kernel.Dwc3Proofs.deviceDescriptor_size
