@@ -29,6 +29,9 @@ it was sent, and what it signs is what it showed.
   holder has to compare it with the wallet they mean: the device cannot know which wallet that is.
 - **Read the result of an earlier signing as this one's.** What was signed before is forgotten when a new
   payment arrives.
+- **Light the panel, or keep it lit.** A frame that changes what is drawn lights a dark panel, and a host
+  that keeps sending such frames keeps it lit. That costs battery and nothing else: it does not set the lock
+  clock back.
 - **Press the buttons.** Only in an image built for regtest, which the tests need. In a signet or mainnet
   image that frame is refused (`only_test_builds_inject_keys`).
 - **Read and write the phone's registers.** Only in an image built for regtest, where it is how new hardware
@@ -61,8 +64,16 @@ it was sent, and what it signs is what it showed.
   used on a real phone until the key is tied to hardware that limits guesses. Against someone using the
   device itself, the count holds: an attempt is counted on storage before the PIN is tried, a PIN is not
   tried if it cannot be counted, and the tenth wrong one wipes both slots.
-- **A device left unlocked.** It locks itself after about five minutes without a button press, and at once
-  from its lock button. In between, whoever picks it up can sign what the cable offers.
+- **A device left unlocked.** It locks itself after about five minutes without a button press or a tap, and
+  at once from its lock button. In between, whoever picks it up can sign what the cable offers.
+- **A dark panel is not a locked one.** The panel goes dark after about a minute, and for the four minutes
+  after that an unlocked device is dark and still unlocked, as it was lit and unlocked before. Going dark
+  does not lengthen that: the lock is decided from its own clock, which only a press or a tap sets back
+  (`lock_is_the_lock_clock`, `only_a_person_sets_the_lock_clock`), so neither the cable nor a stray touch on
+  the glass holds it unlocked. A press on a dark panel lights it and is not passed on
+  (`off_never_delivers`), so an armed payment cannot be signed by a press nobody could see the meaning of.
+  Dark is a black picture only. The key is in memory exactly as when lit, and nothing is powered down that
+  would stop someone with the phone on a bench.
 - **Side channels beyond timing.** The signing code does not branch on a secret or use one as an address, and
   the processor's data-independent timing mode is on. Power and electromagnetic measurement by someone with
   the phone on a bench are not addressed. That the compiler kept the code free of secret-dependent branches is

@@ -24,7 +24,7 @@ runs under QEMU, which is where it is tested.
   a key from 12 words on the touchscreen, accepted a SegWit v0 wallet of two of three keys, and signed one
   payment of 25,000 sats from it, which mainnet confirmed in block 977,106
   (`ad56e89c5505c7f8c457defaeef69575cd03e26edf62ecf335f9882bb317fefe`). The wallet held under 100,000 sats.
-  Nothing changed after that commit has run on the phone.
+  Nothing changed after that commit has run on the phone in a signet or mainnet image.
 - That is the only wallet with money in it whose key it has held, and nobody but its author has read it.
 - On the Pixel the key is in memory only: switching the phone off loses it, and it comes back from its 12 or
   24 words. Keeping it on the phone's storage is written and tested under QEMU but is not safe to use yet (see
@@ -47,6 +47,26 @@ runs under QEMU, which is where it is tested.
 Nothing sent over the cable signs. While a wallet or a payment is on the screen, nothing sent over the cable
 replaces it. Left unlocked and alone for about five minutes, it locks and wipes its secrets from memory.
 
+Left alone for about a minute, locked or not, its panel goes dark. A button press or a touch lights it again
+and does nothing else: a press on a dark panel is never passed on to the screen behind it. A new wallet or
+payment from the cable lights it too. Going dark changes nothing about locking, and a panel lit after the
+five minutes shows the lock screen. What "dark" is, exactly:
+
+- Dark: the picture is black, which on this OLED panel is unlit pixels, and nothing is drawn until it is lit
+  again. The touch controller is not read; only its interrupt line is looked at.
+- Still powered: the panel's own controller, the display controller and the link between them (no display-off
+  or sleep command is sent); the touch controller, which goes on scanning so that a touch can light the panel;
+  USB; and the processor, at its usual speed.
+- Dark, the processor sleeps between looks at the buttons, the glass and the cable, about 370 times a second
+  (`wfe`, woken by the timer's event stream), in regtest, signet and mainnet images alike. An image whose
+  sleep did not end would be dark and deaf until switched off, and switching off loses the key, so the sleep
+  was tried in a regtest image first.
+- A regtest image of commit `0f631c9` ran on the Pixel on 2026-11-22. Its panel went dark a minute after the
+  last press, it answered the cable through five minutes of dark and sleep, it locked itself in the dark at
+  five minutes with the panel still dark, a press from the host then lit the lock screen and pressed nothing,
+  and a touch lit a dark panel. How much power any of this saves has not been measured. Signet and mainnet
+  images were given the sleep after that run, and no signet or mainnet image with it has run on the phone.
+
 ## What is proved, and what is not
 
 `lake build TricorderGate` fails if any theorem named in `Tricorder/Gate.lean` has an unproved step or depends
@@ -64,7 +84,8 @@ Proved:
 - The rules for the cable (`Kernel/WireProofs.lean`): locked, nothing private is answered; while reviewing,
   nothing is replaced; only a regtest build lets the host press the buttons.
 - Smaller facts about the page tables, the device-tree header, the storage slots, the frame buffer's bounds and
-  the buttons' debounce (`Kernel/*Proofs.lean`), and about the runtime's allocator and big numbers (`Mini/`,
+  the buttons' debounce (`Kernel/*Proofs.lean`), about going dark (`Kernel/IdleProofs.lean`: a dark panel
+  passes no press on, any press lights it, and the lock is decided as if the panel were lit), and about the runtime's allocator and big numbers (`Mini/`,
   `Runtime/`).
 
 Not proved:
@@ -83,7 +104,8 @@ Not proved:
 ```text
 Tricorder/   Keys and the vault (Crypto/), wallets, review and signing (Signer/), the QR encoder (Qr/),
              the screens (Ui/), their proofs (Proofs/), the gate (Gate.lean), the firmware's main loop (OsMain.lean)
-Kernel/      Page tables, device tree, entropy, storage slots, the cable's frames, USB, frame buffer, buttons
+Kernel/      Page tables, device tree, entropy, storage slots, the cable's frames, USB, frame buffer, buttons,
+             the touchscreen, going dark when left alone
 MkBoot/      The boot image and its signature, made in Lean
 boot/, rt/   Boot code, and the runtime's C
 Mini/, Runtime/   The runtime's Lean, from silo-os

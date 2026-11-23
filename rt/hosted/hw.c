@@ -20,6 +20,7 @@ lean_obj_res silo_hw_rndr(void) { return lean_alloc_array(0, 0); }
 lean_obj_res silo_hw_cpu_info(void) { return lean_alloc_array(0, 0); }
 lean_obj_res silo_hw_console(b_lean_obj_arg b) { (void)b; return lean_box(0); }
 lean_obj_res silo_hw_pause(void) { return lean_box(0); }
+lean_obj_res silo_hw_idle_wait(void) { return lean_box(0); }
 uint64_t silo_hw_ticks(void) { return 0; }
 uint32_t silo_hw_boot_check(void) { return 0; }
 lean_obj_res silo_hw_halt(uint32_t c) { (void)c; return lean_box(0); }
