@@ -764,9 +764,9 @@ def bareMain : IO UInt32 := do
             swallowTap := false
       -- The clocks: the lock, and the panel going dark.
       st := (← noteInput st .none).1
-      -- Dark, a regtest image sleeps between looks at the buttons, the glass and the cable. Signet and
-      -- mainnet images spin as they always have, until the sleep has been seen to end on a phone.
-      if st.dark && isTestBuild st.model then Hw.idleWait else Hw.pause
+      -- Dark, every image sleeps between looks at the buttons, the glass and the cable. The sleep was
+      -- seen to end on the phone in a regtest image before signet and mainnet images were given it.
+      if st.dark then Hw.idleWait else Hw.pause
   return 0
 
 def main : IO UInt32 := bareMain

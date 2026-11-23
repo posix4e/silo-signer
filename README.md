@@ -57,15 +57,15 @@ five minutes shows the lock screen. What "dark" is, exactly:
 - Still powered: the panel's own controller, the display controller and the link between them (no display-off
   or sleep command is sent); the touch controller, which goes on scanning so that a touch can light the panel;
   USB; and the processor, at its usual speed.
-- In a regtest image the processor sleeps between looks at the buttons, the glass and the cable, about 370
-  times a second (`wfe`, woken by the timer's event stream). In signet and mainnet images it does not sleep:
-  it spins as before. An image whose sleep did not end would be dark and deaf until switched off, and
-  switching off loses the key, so the sleep was tried in a regtest image first.
+- Dark, the processor sleeps between looks at the buttons, the glass and the cable, about 370 times a second
+  (`wfe`, woken by the timer's event stream), in regtest, signet and mainnet images alike. An image whose
+  sleep did not end would be dark and deaf until switched off, and switching off loses the key, so the sleep
+  was tried in a regtest image first.
 - A regtest image of commit `0f631c9` ran on the Pixel on 2026-11-22. Its panel went dark a minute after the
   last press, it answered the cable through five minutes of dark and sleep, it locked itself in the dark at
   five minutes with the panel still dark, a press from the host then lit the lock screen and pressed nothing,
-  and a touch lit a dark panel. How much power any of this saves has not been measured, and no signet or
-  mainnet image with it has run on the phone.
+  and a touch lit a dark panel. How much power any of this saves has not been measured. Signet and mainnet
+  images were given the sleep after that run, and no signet or mainnet image with it has run on the phone.
 
 ## What is proved, and what is not
 
