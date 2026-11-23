@@ -14,6 +14,7 @@ import Kernel.Komodo
 import Kernel.Dwc3
 import Kernel.KomodoTouch
 import Kernel.Idle
+import Kernel.UsbLink
 import Kernel.Panel
 import Tricorder.BuildConfig
 import Tricorder.Network
@@ -66,6 +67,8 @@ structure BareState where
   idle : Idle.State := {}
   /-- How many presses, taps and other stirrings `Kernel.Idle` has been told of, for the bench. -/
   idleSeen : Nat × Nat × Nat := (0, 0, 0)
+  /-- The last few states of the USB link, newest first, kept by regtest images (`Kernel.UsbLink`). -/
+  usbLog : List UsbLink.Sample := []
 
 private def hasWindow (wins : Array Hw.Window) (addr len : UInt64) : Bool :=
   wins.any fun w => addr ≥ w.base && w.size ≥ len && addr - w.base ≤ w.size - len
@@ -411,6 +414,10 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
     --   'i'                 going dark, without disturbing it: whether the panel is dark (u32), ticks since a
     --                       person's last press or tap and since the panel last had a reason to be lit
     --                       (u64 each), and how many presses, taps and other stirrings there have been (u32 each)
+    --   'u'                 the USB link's record (`Kernel.UsbLink`): the time now (u64), the events seen (u32),
+    --                       how many states follow (u32), then each, newest first: when it was first seen
+    --                       (u64), status, control, events then, last event, and configured | gated << 1
+    --                       (u32 each)
     -- A register outside every window ends the run: the reply is what was read so far, as an error.
     let wins ← Hw.windows
     let p := f.payload
@@ -456,6 +463,15 @@ private def handleWireFrame (st : BareState) (f : Wire.Frame) : BaseIO (BareStat
         out := push32 out (if st.idle.phase == .off then 1 else 0)
         out := push64 (push64 out (now - st.idle.lastPerson).toUInt64) (now - st.idle.lastScreen).toUInt64
         out := push32 (push32 (push32 out keys.toUInt32) taps.toUInt32) stirs.toUInt32
+        i := i + 1
+      else if tag == 0x75 then                        -- 'u'
+        out := push64 out (← Hw.ticks)
+        out := push32 out ((st.dwc3?.map (·.evSeen.toUInt32)).getD 0)
+        out := push32 out st.usbLog.length.toUInt32
+        for s in st.usbLog do
+          out := push32 (push32 (push64 out s.ticks.toUInt64) s.dsts) s.dctl
+          out := push32 (push32 out s.events.toUInt32) s.lastEv
+          out := push32 out ((if s.configured then 1 else 0) ||| (if s.gated then 2 else 0))
         i := i + 1
       else
         bad := some "BAD_LAB_STEP"
@@ -694,6 +710,17 @@ def bareMain : IO UInt32 := do
             lastUsbUiTick := 0
             st := rebuildView { st with model := { st.model with statusMsg := s!"USB EV={usb'.evSeen} R={usb'.lastSetupReq} V={usb'.lastSetupVal}" } } false
             st ← showIfChanged st
+        -- A regtest image keeps a record of the link and says each change of it in the status line, so that
+        -- a link that has gone can be read off the screen. It does not light a dark panel.
+        if isTestBuild st.model then
+          let s ← usb'.sample (← Hw.ticks).toNat
+          let changed := match st.usbLog with
+            | last :: _ => !last.same s
+            | [] => true
+          if changed then
+            let msg := s!"USB L={s.linkState} S={s.speed} C={if s.configured then 1 else 0} G={if s.gated then 1 else 0} EV={s.events}"
+            st := rebuildView { st with usbLog := UsbLink.note st.usbLog s, model := { st.model with statusMsg := msg } } false
+            st ← renderIfDirty st
         match frame? with
         | some (.error err) =>
           let usb'' ← usb'.sendFrame { op := .respErr, payload := err.toUTF8 }
