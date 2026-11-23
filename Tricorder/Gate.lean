@@ -8,6 +8,7 @@ import Kernel.VaultStoreProofs
 import Kernel.WireProofs
 import Kernel.FbProofs
 import Kernel.GpioKeysProofs
+import Kernel.TouchProofs
 import Kernel.Dwc3Proofs
 import Tricorder.Proofs.LayoutProofs
 import Tricorder.Proofs.StateProofs
@@ -90,6 +91,7 @@ elab "#gate_axioms " id:ident : command => do
 #gate_axioms Kernel.WireProofs.locked_blocks_privileged
 #gate_axioms Kernel.WireProofs.reviewing_blocks_push
 #gate_axioms Kernel.WireProofs.only_test_builds_inject_keys
+#gate_axioms Kernel.WireProofs.only_test_builds_touch_registers
 #gate_axioms Kernel.WireProofs.decode_rejects_short
 #gate_axioms Kernel.WireProofs.decode_rejects_bad_magic
 
@@ -101,6 +103,10 @@ elab "#gate_axioms " id:ident : command => do
 #gate_axioms Kernel.GpioKeysProofs.two_tick_glitch_never_fires
 #gate_axioms Kernel.GpioKeysProofs.three_ticks_fires_and_latches
 #gate_axioms Kernel.GpioKeysProofs.latched_never_refires
+#gate_axioms Kernel.TouchProofs.down_never_taps
+#gate_axioms Kernel.TouchProofs.tap_is_a_still_lift
+#gate_axioms Kernel.TouchProofs.lift_forgets
+#gate_axioms Kernel.TouchProofs.moved_stays_moved
 #gate_axioms Kernel.GpioKeysProofs.release_resets_latch
 #gate_axioms Kernel.GpioKeysProofs.single_glitch_keys_none
 

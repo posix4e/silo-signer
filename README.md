@@ -19,10 +19,15 @@ runs under QEMU, which is where it is tested.
   two of three keys against Bitcoin Core on regtest (`scripts/qemu-regtest-e2e`).
 - An earlier image, commit `b605672`, ran on a Pixel 9 Pro XL on 2026-11-22: it made a key from the phone's
   hardware random source, and co-signed two payments from a Taproot wallet of two of three keys that a signet
-  confirmed. The phone has not been flashed since, so nothing changed after that commit has run on it.
-- It has not held a key of a wallet with money in it, and nobody but its author has read it.
-- On the Pixel the key is in memory only: switching the phone off loses it, and it comes back from its 24
-  words. Keeping it on the phone's storage is written and tested under QEMU but is not safe to use yet (see
+  confirmed.
+- An image built for mainnet from commit `519e5f0` ran on the same phone later that day. Its holder restored
+  a key from 12 words on the touchscreen, accepted a SegWit v0 wallet of two of three keys, and signed one
+  payment of 25,000 sats from it, which mainnet confirmed in block 977,106
+  (`ad56e89c5505c7f8c457defaeef69575cd03e26edf62ecf335f9882bb317fefe`). The wallet held under 100,000 sats.
+  Nothing changed after that commit has run on the phone.
+- That is the only wallet with money in it whose key it has held, and nobody but its author has read it.
+- On the Pixel the key is in memory only: switching the phone off loses it, and it comes back from its 12 or
+  24 words. Keeping it on the phone's storage is written and tested under QEMU but is not safe to use yet (see
   `THREAT_MODEL.md`).
 - The phone's bootloader is unlocked. Anyone holding the phone can put another image on it.
 

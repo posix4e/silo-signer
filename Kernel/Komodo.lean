@@ -12,7 +12,8 @@ Target subsystems for Phase 2 live bring-up on slot `_b`:
   Exynos DECON command-mode flush (`samsung,exynos-decon`)
 - **Physical Buttons**: Exynos `GPA*` GPIO bank (`samsung,exynos-pinctrl` / `gpio-keys`)
 - **Watchdog**: Samsung `s3c2410-wdt` (`samsung,exynos-wdt` / `samsung,s3c2410-wdt`)
-- **Raw 2-Slot Vault Storage**: Polled Exynos UFSHCI 3.1/4.0 (`samsung,exynos-ufs`)
+- **Raw 2-Slot Vault Storage**: Polled Exynos UFSHCI 3.1/4.0 (`samsung,exynos-ufs`). Not built: the
+  controller is found and nothing more, so on the phone the vault is in memory only
 - **USB-C Wire Transport**: Polled Synopsys DWC3 (`snps,dwc3`)
 - **Debug Console**: Exynos UART (`samsung,exynos-uart` / `google,exynos-usi-uart`) -/
 

@@ -42,6 +42,21 @@ def main : IO UInt32 := do
       (hexBytes (seed.extract 0 8) == "408b285c12383600") (hexBytes (seed.extract 0 8))
 
   -- 2. Vault seal / open / wrong PIN / wrong network
+  -- 1b. Twelve words: BIP39's own vectors, and BIP86's key for the first of them.
+  let twelve := Bip39Ascii.splitSentence "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+  check fails "BIP39 12 words: all-zero 128-bit entropy" ((Bip39Ascii.validate twelve).toOption == some (ByteArray.mk (Array.replicate 16 0)))
+  check fails "BIP39 12 words: bad checksum refused" (!(Bip39Ascii.validate (twelve.set! 11 "abandon")).isOk)
+  let legal := Bip39Ascii.splitSentence "legal winner thank year wave sausage worth useful legal winner thank yellow"
+  check fails "BIP39 12 words: 7f.. entropy" ((Bip39Ascii.validate legal).toOption == some (ByteArray.mk (Array.replicate 16 0x7f)))
+  check fails "BIP39 refuses 13 words" (!(Bip39Ascii.validate (twelve.push "about")).isOk)
+  check fails "BIP39 refuses 15 words" (!(Bip39Ascii.validate (twelve ++ #["abandon", "abandon", "about"])).isOk)
+  check fails "BIP39 12 words: the seed of the specification" (hexBytes (Bip39Ascii.toSeed twelve) ==
+    "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4")
+  match Identity.ofWords twelve .mainnet with
+  | .error e => check fails "12 words make an identity" false e
+  | .ok id12 =>
+    check fails "12 words: BIP86's account key at m/86'/0'/0'" (id12.overrideKeyExpression.endsWith
+      "xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ")
   let .ok words := Bip39Ascii.fromEntropy zero32 | do println "FAIL words"; return 1
   let salt := ByteArray.mk ((Array.range 16).map (·.toUInt8))
   let nonce := ByteArray.mk ((Array.range 12).map (fun i => (i + 7).toUInt8))
